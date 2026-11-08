@@ -38,6 +38,8 @@ class AudioManager {
   bool musicOn = true;
   bool sfxOn = true;
   bool _started = false;
+  String musicStatus = 'not started';
+  String sfxStatus = 'not played yet';
 
   Future<void> startMusic() async {
     if (!musicOn) return;
@@ -46,7 +48,10 @@ class AudioManager {
       await _music.setVolume(0.4);
       await _music.play(AssetSource('music/theme.mp3'));
       _started = true;
-    } catch (_) {}
+      musicStatus = 'playing assets/music/theme.mp3';
+    } catch (e) {
+      musicStatus = 'cannot play assets/music/theme.mp3: $e';
+    }
   }
 
   Future<void> stopMusic() async {
@@ -70,7 +75,10 @@ class AudioManager {
     try {
       await _sfx.stop();
       await _sfx.play(AssetSource('sfx/$name.mp3'));
-    } catch (_) {}
+      sfxStatus = 'played sfx/$name.mp3';
+    } catch (e) {
+      sfxStatus = 'cannot play sfx/$name.mp3: $e';
+    }
   }
 }
 
@@ -746,12 +754,44 @@ class _GameScreenState extends State<GameScreen> {
         ],
       );
 
+  List<List<HCard>> _tableGroups() {
+    final bySet = <int, List<HCard>>{};
+    for (final c in game.table) {
+      bySet.putIfAbsent(c.set, () => []).add(c);
+    }
+    return bySet.values.toList();
+  }
+
+  /// Cards of the same set on the table are drawn stacked together.
+  Widget _tableGroup(List<HCard> g) {
+    final head = g.first;
+    final hi = targets.contains(head);
+    final dim = targets.isNotEmpty && !hi;
+    if (g.length == 1) return CardView(card: head, highlight: hi, dim: dim, onTap: () => _onTableTap(head));
+    const step = 16.0;
+    const w = 52.0;
+    return GestureDetector(
+      onTap: () => _onTableTap(head),
+      child: SizedBox(
+        width: w + 8 + (g.length - 1) * step,
+        height: w * 1.6 + 4,
+        child: Stack(children: [
+          for (var i = 0; i < g.length; i++) Positioned(left: i * step, child: CardView(card: g[i], width: w, highlight: hi, dim: dim)),
+        ]),
+      ),
+    );
+  }
+
   void _openSettings() {
     showModalBottomSheet<void>(
       context: context,
       builder: (ctx) => StatefulBuilder(
         builder: (ctx, setSheet) => SafeArea(
           child: Column(mainAxisSize: MainAxisSize.min, children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
+              child: Text('Music: ${AudioManager.instance.musicStatus}\nSound: ${AudioManager.instance.sfxStatus}', style: const TextStyle(fontSize: 11)),
+            ),
             SwitchListTile(
               title: const Text('Music'),
               value: AudioManager.instance.musicOn,
@@ -819,8 +859,7 @@ class _GameScreenState extends State<GameScreen> {
                     const SizedBox(height: 6),
                     const Text('Table', style: TextStyle(fontSize: 12)),
                     Wrap(children: [
-                      for (final c in game.table)
-                        CardView(card: c, highlight: targets.contains(c), dim: targets.isNotEmpty && !targets.contains(c), onTap: () => _onTableTap(c)),
+                      for (final g in _tableGroups()) _tableGroup(g),
                     ]),
                   ]),
                 ),

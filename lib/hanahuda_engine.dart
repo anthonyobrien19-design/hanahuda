@@ -72,7 +72,19 @@ class Game {
 
   /// Shuffle and deal. Optional [cutCount] models the cutter's cut (the
   /// cut cards go to the middle of the table first); the UI decides the order.
+  /// Redeals automatically if four cards of one set land on the table.
   void deal({Random? rng}) {
+    while (true) {
+      _dealOnce(rng);
+      final counts = <int, int>{};
+      for (final c in table) {
+        counts[c.set] = (counts[c.set] ?? 0) + 1;
+      }
+      if (!counts.values.any((n) => n >= 4)) break;
+    }
+  }
+
+  void _dealOnce(Random? rng) {
     final deck = fullDeck()..shuffle(rng);
     stack.clear();
     table.clear();
@@ -120,7 +132,16 @@ class Game {
     return m.isNotEmpty ? m : List.of(p.hand);
   }
 
-  List<HCard> captureOptions(HCard c) => table.where((t) => t.set == c.set).toList();
+  /// Same-set cards on the table form a stack (2 or 3 can appear after the deal).
+  /// When [stackTakesAll] is true, capturing takes the whole stack.
+  bool stackTakesAll = true;
+
+  List<HCard> stackOf(int set) => table.where((t) => t.set == set).toList();
+
+  List<HCard> captureOptions(HCard c) {
+    final m = stackOf(c.set);
+    return (stackTakesAll && m.isNotEmpty) ? [m.first] : m;
+  }
 
   /// Step 1: play a card from hand. If a match exists, [capture] must be chosen.
   void playFromHand(HCard card, {HCard? capture}) {
@@ -134,8 +155,9 @@ class Game {
       if (capture == null || !opts.contains(capture)) {
         throw StateError('Must capture a matching card');
       }
-      table.remove(capture);
-      teamPiles[p.team]!..add(card)..add(capture);
+      final taken = stackTakesAll ? stackOf(card.set) : [capture];
+      table.removeWhere(taken.contains);
+      teamPiles[p.team]!..add(card)..addAll(taken);
     }
   }
 
@@ -157,8 +179,9 @@ class Game {
       if (capture == null || !opts.contains(capture)) {
         throw StateError('Must capture a matching card');
       }
-      table.remove(capture);
-      teamPiles[currentPlayer.team]!..add(d)..add(capture);
+      final taken = stackTakesAll ? stackOf(d.set) : [capture];
+      table.removeWhere(taken.contains);
+      teamPiles[currentPlayer.team]!..add(d)..addAll(taken);
     }
     _pendingDraw = null;
   }

@@ -44,7 +44,7 @@ class HanahudaAI {
   /// Score taking [capture] (plus [played], if any) for the current team.
   double _scoreCapture(Game g, HCard capture, {HCard? played}) {
     final me = g.currentPlayer.team;
-    final mine = [capture, if (played != null) played];
+    final mine = [...g.stackOf(capture.set), if (played != null) played];
     var s = _gain(g.teamPiles[me]!, mine) + mine.fold(0.0, (a, c) => a + cardValue(c));
     // Denial: value of this card to opponents if left on the table.
     for (final e in g.teamPiles.entries) {
