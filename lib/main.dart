@@ -4,6 +4,7 @@
 // Without art, cards draw as colored placeholders.
 import 'dart:async';
 import 'dart:math';
+import 'package:audioplayers/audioplayers.dart';
 import 'package:flutter/material.dart';
 import 'hanahuda_engine.dart';
 import 'hanahuda_ai.dart';
@@ -23,6 +24,91 @@ class HanahudaApp extends StatelessWidget {
         home: const SetupScreen(),
       );
 }
+
+
+// ---------------------------------------------------------------- Audio
+// Optional files (the game stays silent if a file is missing):
+//   assets/music/theme.mp3          looping background music
+//   assets/sfx/deal.mp3, capture.mp3, flip.mp3, yak.mp3
+class AudioManager {
+  AudioManager._();
+  static final AudioManager instance = AudioManager._();
+  final AudioPlayer _music = AudioPlayer();
+  final AudioPlayer _sfx = AudioPlayer();
+  bool musicOn = true;
+  bool sfxOn = true;
+  bool _started = false;
+
+  Future<void> startMusic() async {
+    if (!musicOn) return;
+    try {
+      await _music.setReleaseMode(ReleaseMode.loop);
+      await _music.setVolume(0.4);
+      await _music.play(AssetSource('music/theme.mp3'));
+      _started = true;
+    } catch (_) {}
+  }
+
+  Future<void> stopMusic() async {
+    try {
+      await _music.stop();
+      _started = false;
+    } catch (_) {}
+  }
+
+  Future<void> setMusic(bool on) async {
+    musicOn = on;
+    if (on) {
+      if (!_started) await startMusic();
+    } else {
+      await stopMusic();
+    }
+  }
+
+  Future<void> sfx(String name) async {
+    if (!sfxOn) return;
+    try {
+      await _sfx.stop();
+      await _sfx.play(AssetSource('sfx/$name.mp3'));
+    } catch (_) {}
+  }
+}
+
+// ---------------------------------------------------------------- Table background
+class FeltPainter extends CustomPainter {
+  @override
+  void paint(Canvas c, Size s) {
+    final p = Paint()
+      ..color = Colors.white.withOpacity(0.045)
+      ..strokeWidth = 1;
+    for (double x = -s.height; x < s.width; x += 30) {
+      c.drawLine(Offset(x, 0), Offset(x + s.height, s.height), p);
+      c.drawLine(Offset(x + s.height, 0), Offset(x, s.height), p);
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant CustomPainter old) => false;
+}
+
+Widget gameBackground() => Stack(fit: StackFit.expand, children: [
+      Image.asset(
+        'assets/backgrounds/table.jpg',
+        fit: BoxFit.cover,
+        errorBuilder: (_, __, ___) => Image.asset(
+          'assets/backgrounds/table.png',
+          fit: BoxFit.cover,
+          errorBuilder: (_, __, ___) => Container(
+            decoration: const BoxDecoration(
+              gradient: RadialGradient(center: Alignment(0, -0.2), radius: 1.1, colors: [Color(0xFF2E7D4F), Color(0xFF14412A), Color(0xFF0A2417)]),
+            ),
+            child: CustomPaint(painter: FeltPainter()),
+          ),
+        ),
+      ),
+      // Dark overlay keeps cards readable over any picture you add.
+      Container(color: Colors.black.withOpacity(0.2)),
+    ]);
 
 // ---------------------------------------------------------------- Setup
 class SetupScreen extends StatefulWidget {
@@ -363,7 +449,14 @@ class _GameScreenState extends State<GameScreen> {
     for (final t in game.teamPiles.keys) {
       totals[t] = 0;
     }
+    AudioManager.instance.startMusic();
     WidgetsBinding.instance.addPostFrameCallback((_) => _playMatch());
+  }
+
+  @override
+  void dispose() {
+    AudioManager.instance.stopMusic();
+    super.dispose();
   }
 
   String teamName(int t) {
@@ -400,6 +493,7 @@ class _GameScreenState extends State<GameScreen> {
 
   Future<void> _playRound() async {
     game.deal();
+    AudioManager.instance.sfx('deal');
     setState(() {
       flipped = null;
       message = 'Me dou kat! ${game.players[game.dealer].name} dealt (merous).';
@@ -426,6 +520,7 @@ class _GameScreenState extends State<GameScreen> {
       lines.writeln('${teamName(e.key)}: ${r.yakScores[e.key] ?? 0}');
       if (yaks.isNotEmpty) lines.writeln('  ${yaks.keys.join(', ')}');
     }
+    if (r.yakScores.values.any((v) => v > 0)) AudioManager.instance.sfx('yak');
     final head = r.winnerTeam == null ? 'Tie' : '${teamName(r.winnerTeam!)} won the round';
     if (!mounted) return;
     setState(() {});
@@ -495,6 +590,7 @@ class _GameScreenState extends State<GameScreen> {
       setState(() => targets = {});
     }
     setState(() => game.playFromHand(card, capture: cap));
+    AudioManager.instance.sfx(cap != null ? 'capture' : 'deal');
     await _delay(500);
     return _flipPhase(human: true);
   }
@@ -506,6 +602,7 @@ class _GameScreenState extends State<GameScreen> {
     await _delay(800);
     if (!mounted) return null;
     setState(() => game.playFromHand(m.card, capture: m.capture));
+    AudioManager.instance.sfx(m.capture != null ? 'capture' : 'deal');
     await _delay(500);
     return _flipPhase(human: false);
   }
@@ -538,6 +635,7 @@ class _GameScreenState extends State<GameScreen> {
         }
       }
       setState(() => game.resolveDraw(capture: cap));
+      AudioManager.instance.sfx(cap != null ? 'capture' : 'flip');
       await _delay(500);
       if (!mounted) return null;
       setState(() => flipped = null);
@@ -575,40 +673,66 @@ class _GameScreenState extends State<GameScreen> {
   }
 
   // ---- Build ----
-  Widget _pileColumn(String label, List<HCard> cards) => Padding(
-        padding: const EdgeInsets.only(right: 10),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text('$label (${cards.length})', style: const TextStyle(fontSize: 11)),
-            SizedBox(
-              width: 34.0 + max(0, cards.length - 1) * 11.0,
-              height: 58,
-              child: Stack(children: [
-                for (var i = 0; i < cards.length; i++) Positioned(left: i * 11.0, child: CardView(card: cards[i], width: 30)),
-              ]),
-            ),
-          ],
-        ),
-      );
-
-  Widget _myPile() {
-    final pile = game.teamPiles[0]!;
-    List<HCard> of(CardType t) => pile.where((c) => c.type == t).toList();
-    final kas = of(CardType.kas).length;
-    final yaks = scoreYaks(pile);
-    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-      SingleChildScrollView(
-        scrollDirection: Axis.horizontal,
-        child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          _pileColumn('okeiim', of(CardType.okeiim)),
-          _pileColumn('tang', of(CardType.tang)),
-          _pileColumn('teruich', of(CardType.teruich)),
-          Text('kas: $kas'),
-        ]),
+  Widget _pileColumn(String label, List<HCard> cards, double cw) {
+    final step = cw * 0.4;
+    return Padding(
+      padding: const EdgeInsets.only(right: 10),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text('$label (${cards.length})', style: const TextStyle(fontSize: 11)),
+          SizedBox(
+            width: cw + 6 + max(0, cards.length - 1) * step,
+            height: cw * 1.6 + 6,
+            child: Stack(children: [
+              for (var i = 0; i < cards.length; i++) Positioned(left: i * step, child: CardView(card: cards[i], width: cw)),
+            ]),
+          ),
+        ],
       ),
-      if (yaks.isNotEmpty) Text('Yaks: ${yaks.keys.join(', ')}', style: const TextStyle(color: Colors.amber, fontSize: 12)),
-    ]);
+    );
+  }
+
+  void _showKas(int team) {
+    final kas = game.teamPiles[team]!.where((c) => c.type == CardType.kas).toList();
+    showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text('${teamName(team)}: kas (${kas.length})'),
+        content: SingleChildScrollView(child: Wrap(children: [for (final c in kas) CardView(card: c, width: 40)])),
+        actions: [TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Close'))],
+      ),
+    );
+  }
+
+  /// Captured cards of any team. Visible to everyone, as at a real table.
+  Widget _teamPile(int team, {double cardW = 26}) {
+    final pile = game.teamPiles[team]!;
+    List<HCard> of(CardType t) => pile.where((c) => c.type == t).toList();
+    final kasCount = of(CardType.kas).length;
+    final yaks = scoreYaks(pile);
+    return Container(
+      width: double.infinity,
+      margin: const EdgeInsets.only(bottom: 4),
+      padding: const EdgeInsets.all(6),
+      decoration: BoxDecoration(
+        border: Border.all(color: team == 0 ? Colors.amber.withOpacity(0.6) : Colors.white24),
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Text('${teamName(team)} captured (${pile.length})', style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600)),
+        SingleChildScrollView(
+          scrollDirection: Axis.horizontal,
+          child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            _pileColumn('okeiim', of(CardType.okeiim), cardW),
+            _pileColumn('tang', of(CardType.tang), cardW),
+            _pileColumn('teruich', of(CardType.teruich), cardW),
+            TextButton(onPressed: kasCount == 0 ? null : () => _showKas(team), child: Text('kas: $kasCount')),
+          ]),
+        ),
+        if (yaks.isNotEmpty) Text('Yaks: ${yaks.keys.join(', ')}', style: const TextStyle(color: Colors.amber, fontSize: 12)),
+      ]),
+    );
   }
 
   Widget _opponents() => Wrap(
@@ -619,12 +743,36 @@ class _GameScreenState extends State<GameScreen> {
               backgroundColor: game.current == i ? Colors.amber.withOpacity(0.35) : null,
               label: Text('${game.players[i].name}  ${game.players[i].hand.length} cards'),
             ),
-          for (final t in game.teamPiles.keys.where((t) => t != 0))
-            Chip(
-              label: Text('${teamName(t)} piles: ${game.teamPiles[t]!.where((c) => c.type != CardType.kas).length} scoring'),
-            ),
         ],
       );
+
+  void _openSettings() {
+    showModalBottomSheet<void>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setSheet) => SafeArea(
+          child: Column(mainAxisSize: MainAxisSize.min, children: [
+            SwitchListTile(
+              title: const Text('Music'),
+              value: AudioManager.instance.musicOn,
+              onChanged: (v) async {
+                await AudioManager.instance.setMusic(v);
+                setSheet(() {});
+              },
+            ),
+            SwitchListTile(
+              title: const Text('Sound effects'),
+              value: AudioManager.instance.sfxOn,
+              onChanged: (v) {
+                AudioManager.instance.sfxOn = v;
+                setSheet(() {});
+              },
+            ),
+          ]),
+        ),
+      ),
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -632,16 +780,29 @@ class _GameScreenState extends State<GameScreen> {
     return Scaffold(
       appBar: AppBar(
         title: Text(totals.entries.map((e) => '${teamName(e.key)} ${e.value}').join('  |  '), style: const TextStyle(fontSize: 14)),
-        actions: [Padding(padding: const EdgeInsets.only(right: 12), child: Center(child: Text('to ${widget.target}')))],
+        actions: [
+          Center(child: Text('to ${widget.target}')),
+          IconButton(icon: const Icon(Icons.settings), onPressed: _openSettings),
+        ],
       ),
-      body: SafeArea(
+      body: Stack(children: [
+        Positioned.fill(child: gameBackground()),
+        SafeArea(
         child: Padding(
           padding: const EdgeInsets.symmetric(horizontal: 8),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               _opponents(),
-              const SizedBox(height: 6),
+              ConstrainedBox(
+                constraints: const BoxConstraints(maxHeight: 150),
+                child: SingleChildScrollView(
+                  child: Column(children: [
+                    for (final t in game.teamPiles.keys.where((t) => t != 0)) _teamPile(t, cardW: 22),
+                  ]),
+                ),
+              ),
+              const SizedBox(height: 4),
               Expanded(
                 child: SingleChildScrollView(
                   child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
@@ -665,7 +826,7 @@ class _GameScreenState extends State<GameScreen> {
                 ),
               ),
               Padding(padding: const EdgeInsets.symmetric(vertical: 4), child: Text(message, style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w600))),
-              _myPile(),
+              _teamPile(0, cardW: 28),
               const SizedBox(height: 6),
               SizedBox(
                 height: 96,
@@ -678,6 +839,7 @@ class _GameScreenState extends State<GameScreen> {
           ),
         ),
       ),
+      ]),
     );
   }
 }
