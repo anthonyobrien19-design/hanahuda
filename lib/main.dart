@@ -200,6 +200,31 @@ String _typeLabel(CardType t) {
   }
 }
 
+// Press and hold any card to see it enlarged; release to close.
+class CardPreview {
+  static OverlayEntry? _entry;
+
+  static void show(BuildContext context, HCard card) {
+    hide();
+    final entry = OverlayEntry(
+      builder: (_) => IgnorePointer(
+        child: Container(
+          color: Colors.black54,
+          alignment: Alignment.center,
+          child: CardView(card: card, width: 230),
+        ),
+      ),
+    );
+    _entry = entry;
+    Overlay.of(context, rootOverlay: true).insert(entry);
+  }
+
+  static void hide() {
+    _entry?.remove();
+    _entry = null;
+  }
+}
+
 class CardView extends StatelessWidget {
   final HCard card;
   final double width;
@@ -213,6 +238,9 @@ class CardView extends StatelessWidget {
   @override
   Widget build(BuildContext context) => GestureDetector(
         onTap: onTap,
+        onLongPressStart: (_) => CardPreview.show(context, card),
+        onLongPressEnd: (_) => CardPreview.hide(),
+        onLongPressCancel: CardPreview.hide,
         child: Opacity(
           opacity: dim ? 0.4 : 1,
           child: AnimatedContainer(
@@ -701,13 +729,30 @@ class _GameScreenState extends State<GameScreen> {
     );
   }
 
-  void _showKas(int team) {
-    final kas = game.teamPiles[team]!.where((c) => c.type == CardType.kas).toList();
+  void _showPile(int team) {
+    final pile = game.teamPiles[team]!;
+    Widget section(String label, CardType t) {
+      final cards = pile.where((c) => c.type == t).toList();
+      if (cards.isEmpty) return const SizedBox.shrink();
+      return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Padding(padding: const EdgeInsets.only(top: 8), child: Text('$label (${cards.length})', style: const TextStyle(fontWeight: FontWeight.w600))),
+        Wrap(children: [for (final c in cards) CardView(card: c, width: 44)]),
+      ]);
+    }
+
     showDialog<void>(
       context: context,
       builder: (ctx) => AlertDialog(
-        title: Text('${teamName(team)}: kas (${kas.length})'),
-        content: SingleChildScrollView(child: Wrap(children: [for (final c in kas) CardView(card: c, width: 40)])),
+        title: Text('${teamName(team)} captured (${pile.length})'),
+        content: SingleChildScrollView(
+          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            section('okeiim', CardType.okeiim),
+            section('tang', CardType.tang),
+            section('teruich', CardType.teruich),
+            section('kas', CardType.kas),
+            const Padding(padding: EdgeInsets.only(top: 10), child: Text('Press and hold a card to enlarge it.', style: TextStyle(fontSize: 11))),
+          ]),
+        ),
         actions: [TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Close'))],
       ),
     );
@@ -717,7 +762,6 @@ class _GameScreenState extends State<GameScreen> {
   Widget _teamPile(int team, {double cardW = 26}) {
     final pile = game.teamPiles[team]!;
     List<HCard> of(CardType t) => pile.where((c) => c.type == t).toList();
-    final kasCount = of(CardType.kas).length;
     final yaks = scoreYaks(pile);
     return Container(
       width: double.infinity,
@@ -728,14 +772,17 @@ class _GameScreenState extends State<GameScreen> {
         borderRadius: BorderRadius.circular(8),
       ),
       child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-        Text('${teamName(team)} captured (${pile.length})', style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600)),
+        GestureDetector(
+          onTap: () => _showPile(team),
+          child: Text('${teamName(team)} captured (${pile.length})  - tap to enlarge', style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600)),
+        ),
         SingleChildScrollView(
           scrollDirection: Axis.horizontal,
           child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
             _pileColumn('okeiim', of(CardType.okeiim), cardW),
             _pileColumn('tang', of(CardType.tang), cardW),
             _pileColumn('teruich', of(CardType.teruich), cardW),
-            TextButton(onPressed: kasCount == 0 ? null : () => _showKas(team), child: Text('kas: $kasCount')),
+            _pileColumn('kas', of(CardType.kas), cardW),
           ]),
         ),
         if (yaks.isNotEmpty) Text('Yaks: ${yaks.keys.join(', ')}', style: const TextStyle(color: Colors.amber, fontSize: 12)),
