@@ -716,7 +716,7 @@ class _GameScreenState extends State<GameScreen> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text('$label (${cards.length})', style: const TextStyle(fontSize: 11)),
+          Text('$label (${cards.length})', style: const TextStyle(fontSize: 14)),
           SizedBox(
             width: cw + 6 + max(0, cards.length - 1) * step,
             height: cw * 1.6 + 6,
@@ -774,7 +774,7 @@ class _GameScreenState extends State<GameScreen> {
       child: Column(crossAxisAlignment: CrossAxisAlignment.center, children: [
         GestureDetector(
           onTap: () => _showPile(team),
-          child: Text('${teamName(team)} captured (${pile.length})  - tap to enlarge', style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600)),
+          child: Text('${teamName(team)} captured (${pile.length})  - tap to enlarge', style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
         ),
         _centeredRow([
           _pileColumn('okeiim', of(CardType.okeiim), cardW),
@@ -782,7 +782,7 @@ class _GameScreenState extends State<GameScreen> {
           _pileColumn('teruich', of(CardType.teruich), cardW),
           _pileColumn('kas', of(CardType.kas), cardW),
         ], cross: CrossAxisAlignment.start),
-        if (yaks.isNotEmpty) Text('Yaks: ${yaks.keys.join(', ')}', style: const TextStyle(color: Colors.amber, fontSize: 12)),
+        if (yaks.isNotEmpty) Text('Yaks: ${yaks.keys.join(', ')}', style: const TextStyle(color: Colors.amber, fontSize: 15)),
       ]),
     );
   }
@@ -794,7 +794,7 @@ class _GameScreenState extends State<GameScreen> {
           for (var i = 1; i < game.players.length; i++)
             Chip(
               backgroundColor: game.current == i ? Colors.amber.withOpacity(0.35) : null,
-              label: Text('${game.players[i].name}  ${game.players[i].hand.length} cards'),
+              label: Text('${game.players[i].name}  ${game.players[i].hand.length} cards', style: const TextStyle(fontSize: 16)),
             ),
         ],
       );
@@ -826,7 +826,7 @@ class _GameScreenState extends State<GameScreen> {
             if (flipped != null) CardView(card: flipped!, width: _tw, highlight: true),
           ]),
           const SizedBox(height: 8),
-          const Text('Table', style: TextStyle(fontSize: 13)),
+          const Text('Table', style: TextStyle(fontSize: 16)),
           Wrap(
             alignment: WrapAlignment.center,
             runAlignment: WrapAlignment.center,
@@ -908,9 +908,9 @@ class _GameScreenState extends State<GameScreen> {
     final hand = game.players[0].hand;
     return Scaffold(
       appBar: AppBar(
-        title: Text(totals.entries.map((e) => '${teamName(e.key)} ${e.value}').join('  |  '), style: const TextStyle(fontSize: 14)),
+        title: Text(totals.entries.map((e) => '${teamName(e.key)} ${e.value}').join('  |  '), style: const TextStyle(fontSize: 19, fontWeight: FontWeight.w600)),
         actions: [
-          Center(child: Text('to ${widget.target}')),
+          Center(child: Text('to ${widget.target}', style: const TextStyle(fontSize: 17))),
           IconButton(icon: const Icon(Icons.settings), onPressed: _openSettings),
         ],
       ),
@@ -924,13 +924,13 @@ class _GameScreenState extends State<GameScreen> {
             if (wide) {
               _tw = (h * 0.12).clamp(48.0, 90.0).toDouble();
               _hw = (h * 0.14).clamp(52.0, 100.0).toDouble();
-              _pwOpp = (h * 0.055).clamp(24.0, 40.0).toDouble();
-              _pwMine = (h * 0.065).clamp(26.0, 46.0).toDouble();
+              _pwOpp = (h * 0.075).clamp(30.0, 54.0).toDouble();
+              _pwMine = (h * 0.075).clamp(30.0, 54.0).toDouble();
             } else {
               _tw = (w / 8).clamp(44.0, 66.0).toDouble();
               _hw = (w / 6.5).clamp(50.0, 76.0).toDouble();
-              _pwOpp = (w / 15).clamp(20.0, 30.0).toDouble();
-              _pwMine = (w / 12).clamp(24.0, 36.0).toDouble();
+              _pwOpp = (w / 12.5).clamp(24.0, 36.0).toDouble();
+              _pwMine = (w / 9.5).clamp(28.0, 42.0).toDouble();
             }
             final oppPiles = [for (final t in game.teamPiles.keys.where((t) => t != 0)) _teamPile(t, cardW: _pwOpp)];
             final board = Column(children: [
@@ -952,13 +952,19 @@ class _GameScreenState extends State<GameScreen> {
               _handRow(hand),
               const SizedBox(height: 6),
             ]);
+            final panelW = min(w * 0.28, 420.0);
             final content = wide
                 ? Row(children: [
+                    SizedBox(
+                      width: panelW,
+                      child: Center(child: SingleChildScrollView(child: Column(children: oppPiles))),
+                    ),
+                    const SizedBox(width: 8),
                     Expanded(child: board),
                     const SizedBox(width: 8),
                     SizedBox(
-                      width: min(w * 0.36, 480.0),
-                      child: SingleChildScrollView(child: Column(children: [...oppPiles, _teamPile(0, cardW: _pwMine)])),
+                      width: panelW,
+                      child: Center(child: SingleChildScrollView(child: _teamPile(0, cardW: _pwMine))),
                     ),
                   ])
                 : board;
