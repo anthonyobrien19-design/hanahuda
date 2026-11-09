@@ -771,26 +771,24 @@ class _GameScreenState extends State<GameScreen> {
         border: Border.all(color: team == 0 ? Colors.amber.withOpacity(0.6) : Colors.white24),
         borderRadius: BorderRadius.circular(8),
       ),
-      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      child: Column(crossAxisAlignment: CrossAxisAlignment.center, children: [
         GestureDetector(
           onTap: () => _showPile(team),
           child: Text('${teamName(team)} captured (${pile.length})  - tap to enlarge', style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600)),
         ),
-        SingleChildScrollView(
-          scrollDirection: Axis.horizontal,
-          child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
-            _pileColumn('okeiim', of(CardType.okeiim), cardW),
-            _pileColumn('tang', of(CardType.tang), cardW),
-            _pileColumn('teruich', of(CardType.teruich), cardW),
-            _pileColumn('kas', of(CardType.kas), cardW),
-          ]),
-        ),
+        _centeredRow([
+          _pileColumn('okeiim', of(CardType.okeiim), cardW),
+          _pileColumn('tang', of(CardType.tang), cardW),
+          _pileColumn('teruich', of(CardType.teruich), cardW),
+          _pileColumn('kas', of(CardType.kas), cardW),
+        ], cross: CrossAxisAlignment.start),
         if (yaks.isNotEmpty) Text('Yaks: ${yaks.keys.join(', ')}', style: const TextStyle(color: Colors.amber, fontSize: 12)),
       ]),
     );
   }
 
   Widget _opponents() => Wrap(
+        alignment: WrapAlignment.center,
         spacing: 12,
         children: [
           for (var i = 1; i < game.players.length; i++)
@@ -799,6 +797,50 @@ class _GameScreenState extends State<GameScreen> {
               label: Text('${game.players[i].name}  ${game.players[i].hand.length} cards'),
             ),
         ],
+      );
+
+  // Responsive sizes, set on every build.
+  double _tw = 52, _hw = 56, _pwMine = 28, _pwOpp = 22;
+
+  /// A row that is centered when it fits and scrolls sideways when it does not.
+  Widget _centeredRow(List<Widget> kids, {CrossAxisAlignment cross = CrossAxisAlignment.center}) => LayoutBuilder(
+        builder: (ctx, box) => SingleChildScrollView(
+          scrollDirection: Axis.horizontal,
+          child: ConstrainedBox(
+            constraints: BoxConstraints(minWidth: box.maxWidth),
+            child: Row(mainAxisAlignment: MainAxisAlignment.center, crossAxisAlignment: cross, children: kids),
+          ),
+        ),
+      );
+
+  Widget _tableArea() => SingleChildScrollView(
+        child: Column(children: [
+          Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+            Container(
+              width: _tw,
+              height: _tw * 1.6,
+              margin: const EdgeInsets.all(2),
+              decoration: BoxDecoration(color: Colors.green.shade900, borderRadius: BorderRadius.circular(5), border: Border.all(color: Colors.white24)),
+              child: Center(child: Text('${game.stack.length}', style: const TextStyle(fontSize: 18))),
+            ),
+            if (flipped != null) CardView(card: flipped!, width: _tw, highlight: true),
+          ]),
+          const SizedBox(height: 8),
+          const Text('Table', style: TextStyle(fontSize: 13)),
+          Wrap(
+            alignment: WrapAlignment.center,
+            runAlignment: WrapAlignment.center,
+            children: [for (final g in _tableGroups()) _tableGroup(g)],
+          ),
+        ]),
+      );
+
+  Widget _handRow(List<HCard> hand) => SizedBox(
+        height: _hw * 1.6 + 8,
+        child: _centeredRow([
+          for (final c in hand)
+            CardView(card: c, width: _hw, highlight: legal.contains(c), dim: legal.isNotEmpty && !legal.contains(c), onTap: () => _onHandTap(c)),
+        ]),
       );
 
   List<List<HCard>> _tableGroups() {
@@ -814,9 +856,9 @@ class _GameScreenState extends State<GameScreen> {
     final head = g.first;
     final hi = targets.contains(head);
     final dim = targets.isNotEmpty && !hi;
-    if (g.length == 1) return CardView(card: head, highlight: hi, dim: dim, onTap: () => _onTableTap(head));
-    const step = 16.0;
-    const w = 52.0;
+    final w = _tw;
+    if (g.length == 1) return CardView(card: head, width: w, highlight: hi, dim: dim, onTap: () => _onTableTap(head));
+    final step = w * 0.3;
     return GestureDetector(
       onTap: () => _onTableTap(head),
       child: SizedBox(
@@ -875,56 +917,59 @@ class _GameScreenState extends State<GameScreen> {
       body: Stack(children: [
         Positioned.fill(child: gameBackground()),
         SafeArea(
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 8),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              _opponents(),
-              ConstrainedBox(
-                constraints: const BoxConstraints(maxHeight: 150),
-                child: SingleChildScrollView(
-                  child: Column(children: [
-                    for (final t in game.teamPiles.keys.where((t) => t != 0)) _teamPile(t, cardW: 22),
-                  ]),
-                ),
-              ),
+          child: LayoutBuilder(builder: (ctx, box) {
+            final wide = box.maxWidth >= 820 && box.maxWidth / box.maxHeight > 1.25;
+            final h = box.maxHeight;
+            final w = box.maxWidth;
+            if (wide) {
+              _tw = (h * 0.12).clamp(48.0, 90.0).toDouble();
+              _hw = (h * 0.14).clamp(52.0, 100.0).toDouble();
+              _pwOpp = (h * 0.055).clamp(24.0, 40.0).toDouble();
+              _pwMine = (h * 0.065).clamp(26.0, 46.0).toDouble();
+            } else {
+              _tw = (w / 8).clamp(44.0, 66.0).toDouble();
+              _hw = (w / 6.5).clamp(50.0, 76.0).toDouble();
+              _pwOpp = (w / 15).clamp(20.0, 30.0).toDouble();
+              _pwMine = (w / 12).clamp(24.0, 36.0).toDouble();
+            }
+            final oppPiles = [for (final t in game.teamPiles.keys.where((t) => t != 0)) _teamPile(t, cardW: _pwOpp)];
+            final board = Column(children: [
               const SizedBox(height: 4),
-              Expanded(
-                child: SingleChildScrollView(
-                  child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                    Row(children: [
-                      Container(
-                        width: 52,
-                        height: 83,
-                        margin: const EdgeInsets.all(2),
-                        decoration: BoxDecoration(color: Colors.green.shade900, borderRadius: BorderRadius.circular(5), border: Border.all(color: Colors.white24)),
-                        child: Center(child: Text('${game.stack.length}')),
-                      ),
-                      if (flipped != null) CardView(card: flipped!, highlight: true),
-                    ]),
-                    const SizedBox(height: 6),
-                    const Text('Table', style: TextStyle(fontSize: 12)),
-                    Wrap(children: [
-                      for (final g in _tableGroups()) _tableGroup(g),
-                    ]),
-                  ]),
+              _opponents(),
+              const SizedBox(height: 4),
+              if (!wide)
+                ConstrainedBox(
+                  constraints: const BoxConstraints(maxHeight: 170),
+                  child: SingleChildScrollView(child: Column(children: oppPiles)),
                 ),
+              Expanded(child: _tableArea()),
+              Padding(
+                padding: const EdgeInsets.symmetric(vertical: 6),
+                child: Text(message, textAlign: TextAlign.center, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
               ),
-              Padding(padding: const EdgeInsets.symmetric(vertical: 4), child: Text(message, style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w600))),
-              _teamPile(0, cardW: 28),
+              if (!wide) _teamPile(0, cardW: _pwMine),
               const SizedBox(height: 6),
-              SizedBox(
-                height: 96,
-                child: ListView(scrollDirection: Axis.horizontal, children: [
-                  for (final c in hand)
-                    CardView(card: c, width: 56, highlight: legal.contains(c), dim: legal.isNotEmpty && !legal.contains(c), onTap: () => _onHandTap(c)),
-                ]),
+              _handRow(hand),
+              const SizedBox(height: 6),
+            ]);
+            final content = wide
+                ? Row(children: [
+                    Expanded(child: board),
+                    const SizedBox(width: 8),
+                    SizedBox(
+                      width: min(w * 0.36, 480.0),
+                      child: SingleChildScrollView(child: Column(children: [...oppPiles, _teamPile(0, cardW: _pwMine)])),
+                    ),
+                  ])
+                : board;
+            return Center(
+              child: ConstrainedBox(
+                constraints: BoxConstraints(maxWidth: wide ? 1500 : 760),
+                child: Padding(padding: const EdgeInsets.symmetric(horizontal: 8), child: content),
               ),
-            ],
-          ),
+            );
+          }),
         ),
-      ),
       ]),
     );
   }
