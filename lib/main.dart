@@ -228,6 +228,7 @@ class _SetupScreenState extends State<SetupScreen> {
 
   @override
   Widget build(BuildContext context) => Scaffold(
+        backgroundColor: const Color(0xFF14412A),
         body: SafeArea(
           child: Center(child: ConstrainedBox(constraints: const BoxConstraints(maxWidth: 480), child: Padding(
             padding: const EdgeInsets.all(24),
@@ -277,7 +278,7 @@ class _SetupScreenState extends State<SetupScreen> {
                   Expanded(child: OutlinedButton(onPressed: _join, child: const Padding(padding: EdgeInsets.all(12), child: Text('Join a game', style: TextStyle(fontSize: 16))))),
                 ]),
                 const SizedBox(height: 16),
-                const Text('Build 4', textAlign: TextAlign.center, style: TextStyle(fontSize: 11, color: Colors.white54)),
+                const Text('Build 5', textAlign: TextAlign.center, style: TextStyle(fontSize: 11, color: Colors.white54)),
               ],
             ),
           ))),
@@ -1236,7 +1237,7 @@ class _GameScreenState extends State<GameScreen> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text('$label (${cards.length})', style: const TextStyle(fontSize: 14)),
+          Text('$label (${cards.length})', style: TextStyle(fontSize: _compact ? 12 : 14)),
           SizedBox(
             width: cw + 6 + max(0, cards.length - 1) * step,
             height: cw * 1.6 + 6,
@@ -1289,7 +1290,7 @@ class _GameScreenState extends State<GameScreen> {
       child: Container(
       width: double.infinity,
       margin: const EdgeInsets.only(bottom: 4),
-      padding: const EdgeInsets.all(6),
+      padding: EdgeInsets.all(_compact ? 3 : 6),
       decoration: BoxDecoration(
         border: Border.all(color: team == 0 ? Colors.amber.withOpacity(0.6) : Colors.white24),
         borderRadius: BorderRadius.circular(8),
@@ -1297,9 +1298,16 @@ class _GameScreenState extends State<GameScreen> {
       child: Column(crossAxisAlignment: CrossAxisAlignment.center, children: [
         Row(mainAxisSize: MainAxisSize.min, children: [
           Flexible(
-            child: Text('${teamName(team)} captured (${pile.length})', overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
+            child: Text('${teamName(team)} captured (${pile.length})', overflow: TextOverflow.ellipsis, style: TextStyle(fontSize: _compact ? 14 : 16, fontWeight: FontWeight.w600)),
           ),
-          IconButton(tooltip: 'Enlarge', icon: const Icon(Icons.zoom_out_map), onPressed: () => _showPile(team)),
+          IconButton(
+            tooltip: 'Enlarge',
+            iconSize: _compact ? 18 : 24,
+            padding: EdgeInsets.zero,
+            constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
+            icon: const Icon(Icons.zoom_out_map),
+            onPressed: () => _showPile(team),
+          ),
         ]),
         _centeredRow([
           _pileColumn('okeiim', of(CardType.okeiim), cardW),
@@ -1307,25 +1315,28 @@ class _GameScreenState extends State<GameScreen> {
           _pileColumn('teruich', of(CardType.teruich), cardW),
           _pileColumn('kas', of(CardType.kas), cardW),
         ], cross: CrossAxisAlignment.start),
-        if (yaks.isNotEmpty) Text('Yaks: ${yaks.keys.join(', ')}', style: const TextStyle(color: Colors.amber, fontSize: 15)),
+        if (yaks.isNotEmpty) Text('Yaks: ${yaks.keys.join(', ')}', style: TextStyle(color: Colors.amber, fontSize: _compact ? 12 : 15)),
       ]),
     ));
   }
 
   Widget _opponents() => Wrap(
         alignment: WrapAlignment.center,
-        spacing: 12,
+        spacing: _compact ? 6 : 12,
+        runSpacing: 0,
         children: [
           for (var i = 1; i < game.players.length; i++)
             Chip(
               backgroundColor: game.current == i ? Colors.amber.withOpacity(0.35) : null,
-              label: Text('${game.players[i].name}  ${game.players[i].hand.length} cards', style: const TextStyle(fontSize: 16)),
+              visualDensity: _compact ? VisualDensity.compact : VisualDensity.standard,
+              label: Text('${game.players[i].name}  ${game.players[i].hand.length} cards', style: TextStyle(fontSize: _compact ? 13 : 16)),
             ),
         ],
       );
 
   // Responsive sizes, set on every build.
   double _tw = 52, _hw = 56, _pwMine = 28, _pwOpp = 22;
+  bool _compact = false; // phone-sized layout
 
   /// A row that is centered when it fits and scrolls sideways when it does not.
   Widget _centeredRow(List<Widget> kids, {CrossAxisAlignment cross = CrossAxisAlignment.center}) => LayoutBuilder(
@@ -1351,7 +1362,7 @@ class _GameScreenState extends State<GameScreen> {
         final cw = _tw, ch = _tw * 1.6;
         final cx = box.maxWidth / 2, cy = box.maxHeight / 2;
         final rx = max(40.0, box.maxWidth / 2 - cw * 0.9);
-        final ry = max(30.0, box.maxHeight / 2 - ch * 0.7);
+        final ry = min(max(30.0, box.maxHeight / 2 - ch * 0.7), rx * 0.95);
         final groups = _tableGroups();
         final n = groups.length;
         final peekW = cw * 0.75;
@@ -1475,19 +1486,20 @@ class _GameScreenState extends State<GameScreen> {
         Positioned.fill(child: gameBackground()),
         SafeArea(
           child: LayoutBuilder(builder: (ctx, box) {
-            final wide = box.maxWidth >= 820 && box.maxWidth / box.maxHeight > 1.25;
+            const wide = false; // same phone-style column on every screen
+            _compact = !wide;
             final h = box.maxHeight;
-            final w = box.maxWidth;
+            final w = min(box.maxWidth, 620.0);
             if (wide) {
               _tw = (h * 0.12).clamp(48.0, 90.0).toDouble();
               _hw = (h * 0.14).clamp(52.0, 100.0).toDouble();
               _pwOpp = (h * 0.095).clamp(36.0, 64.0).toDouble();
               _pwMine = (h * 0.095).clamp(36.0, 64.0).toDouble();
             } else {
-              _tw = (w / 8).clamp(44.0, 66.0).toDouble();
-              _hw = (w / 6.5).clamp(50.0, 76.0).toDouble();
-              _pwOpp = (w / 10.5).clamp(26.0, 40.0).toDouble();
-              _pwMine = (w / 8.5).clamp(30.0, 46.0).toDouble();
+              _tw = min(w / 8, (h - 430) / 3.4).clamp(34.0, 62.0).toDouble();
+              _hw = (w / 7).clamp(44.0, 66.0).toDouble();
+              _pwOpp = (w / 14).clamp(22.0, 32.0).toDouble();
+              _pwMine = (w / 11.5).clamp(26.0, 40.0).toDouble();
             }
             final oppPiles = [for (final t in game.teamPiles.keys.where((t) => t != 0)) _teamPile(t, cardW: _pwOpp)];
             final board = Column(children: [
@@ -1496,13 +1508,13 @@ class _GameScreenState extends State<GameScreen> {
               const SizedBox(height: 4),
               if (!wide)
                 ConstrainedBox(
-                  constraints: const BoxConstraints(maxHeight: 170),
+                  constraints: const BoxConstraints(maxHeight: 112),
                   child: SingleChildScrollView(child: Column(children: oppPiles)),
                 ),
               Expanded(child: _tableArea()),
               Padding(
-                padding: const EdgeInsets.symmetric(vertical: 6),
-                child: Text(message, textAlign: TextAlign.center, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
+                padding: EdgeInsets.symmetric(vertical: wide ? 6 : 2),
+                child: Text(message, textAlign: TextAlign.center, style: TextStyle(fontSize: wide ? 16 : 15, fontWeight: FontWeight.w600)),
               ),
               if (!wide) _teamPile(0, cardW: _pwMine),
               const SizedBox(height: 6),
@@ -1527,7 +1539,7 @@ class _GameScreenState extends State<GameScreen> {
                 : board;
             return Center(
               child: ConstrainedBox(
-                constraints: BoxConstraints(maxWidth: wide ? 1500 : 760),
+                constraints: const BoxConstraints(maxWidth: 620),
                 child: Padding(padding: const EdgeInsets.symmetric(horizontal: 8), child: content),
               ),
             );
