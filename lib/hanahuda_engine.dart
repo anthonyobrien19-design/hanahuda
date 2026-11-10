@@ -143,9 +143,13 @@ class Game {
 
   List<HCard> stackOf(int set) => table.where((t) => t.set == set).toList();
 
+  /// Only three cards of one set on the table form a stack (taken whole).
+  /// Two cards of a set are separate, and the player chooses which to take.
+  bool _isStack(int set) => stackTakesAll && stackOf(set).length >= 3;
+
   List<HCard> captureOptions(HCard c) {
     final m = stackOf(c.set);
-    return (stackTakesAll && m.isNotEmpty) ? [m.first] : m;
+    return _isStack(c.set) ? [m.first] : m;
   }
 
   /// Step 1: play a card from hand. If a match exists, [capture] must be chosen.
@@ -160,7 +164,7 @@ class Game {
       if (capture == null || !opts.contains(capture)) {
         throw StateError('Must capture a matching card');
       }
-      final taken = stackTakesAll ? stackOf(card.set) : [capture];
+      final taken = _isStack(card.set) ? stackOf(card.set) : [capture];
       table.removeWhere(taken.contains);
       teamPiles[p.team]!..add(card)..addAll(taken);
     }
@@ -184,7 +188,7 @@ class Game {
       if (capture == null || !opts.contains(capture)) {
         throw StateError('Must capture a matching card');
       }
-      final taken = stackTakesAll ? stackOf(d.set) : [capture];
+      final taken = _isStack(d.set) ? stackOf(d.set) : [capture];
       table.removeWhere(taken.contains);
       teamPiles[currentPlayer.team]!..add(d)..addAll(taken);
     }

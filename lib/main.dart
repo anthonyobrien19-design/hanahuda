@@ -278,7 +278,7 @@ class _SetupScreenState extends State<SetupScreen> {
                   Expanded(child: OutlinedButton(onPressed: _join, child: const Padding(padding: EdgeInsets.all(12), child: Text('Join a game', style: TextStyle(fontSize: 16))))),
                 ]),
                 const SizedBox(height: 16),
-                const Text('Build 5', textAlign: TextAlign.center, style: TextStyle(fontSize: 11, color: Colors.white54)),
+                const Text('Build 6', textAlign: TextAlign.center, style: TextStyle(fontSize: 11, color: Colors.white54)),
               ],
             ),
           ))),
@@ -908,7 +908,7 @@ class _GameScreenState extends State<GameScreen> {
     final opts = game.captureOptions(card);
     setState(() {
       message = '${p.name} plays ${setNames[card.set]}#${card.index}';
-      game.playFromHand(card, capture: opts.isEmpty ? null : opts.first);
+      game.playFromHand(card, capture: opts.isEmpty ? null : (opts.length == 1 ? opts.first : (ai.chooseDrawCapture(game, card) ?? opts.first)));
     });
     AudioManager.instance.sfx(opts.isNotEmpty ? 'capture' : 'deal');
     await _delay(500);
@@ -1362,7 +1362,7 @@ class _GameScreenState extends State<GameScreen> {
         final cw = _tw, ch = _tw * 1.6;
         final cx = box.maxWidth / 2, cy = box.maxHeight / 2;
         final rx = max(40.0, box.maxWidth / 2 - cw * 0.9);
-        final ry = min(max(30.0, box.maxHeight / 2 - ch * 0.7), rx * 0.95);
+        final ry = max(ch * 1.05, min(box.maxHeight / 2 - ch * 0.7, rx * 0.95));
         final groups = _tableGroups();
         final n = groups.length;
         final peekW = cw * 0.75;
@@ -1393,7 +1393,7 @@ class _GameScreenState extends State<GameScreen> {
           final g = groups[i];
           final ang = -pi / 2 + 2 * pi * i / n;
           kids.add(AnimatedPositioned(
-            key: ValueKey('tg${g.first.set}'),
+            key: ValueKey('tg${g.first.id}'),
             duration: const Duration(milliseconds: 250),
             left: cx + rx * cos(ang) - _groupWidth(g) / 2,
             top: cy + ry * sin(ang) - ch / 2,
@@ -1416,7 +1416,18 @@ class _GameScreenState extends State<GameScreen> {
     for (final c in game.table) {
       bySet.putIfAbsent(c.set, () => []).add(c);
     }
-    return bySet.values.toList();
+    // Only three of a set form a stack; one or two stay as separate cards.
+    final out = <List<HCard>>[];
+    for (final g in bySet.values) {
+      if (g.length >= 3) {
+        out.add(g);
+      } else {
+        for (final c in g) {
+          out.add([c]);
+        }
+      }
+    }
+    return out;
   }
 
   /// Cards of the same set on the table are drawn stacked together.
@@ -1496,7 +1507,7 @@ class _GameScreenState extends State<GameScreen> {
               _pwOpp = (h * 0.095).clamp(36.0, 64.0).toDouble();
               _pwMine = (h * 0.095).clamp(36.0, 64.0).toDouble();
             } else {
-              _tw = min(w / 8, (h - 430) / 3.4).clamp(34.0, 62.0).toDouble();
+              _tw = min(w / 8, (h - 400) / 5.0).clamp(32.0, 62.0).toDouble();
               _hw = (w / 7).clamp(44.0, 66.0).toDouble();
               _pwOpp = (w / 14).clamp(22.0, 32.0).toDouble();
               _pwMine = (w / 11.5).clamp(26.0, 40.0).toDouble();
@@ -1508,7 +1519,7 @@ class _GameScreenState extends State<GameScreen> {
               const SizedBox(height: 4),
               if (!wide)
                 ConstrainedBox(
-                  constraints: const BoxConstraints(maxHeight: 112),
+                  constraints: BoxConstraints(maxHeight: oppPiles.length > 1 ? 210 : 160),
                   child: SingleChildScrollView(child: Column(children: oppPiles)),
                 ),
               Expanded(child: _tableArea()),
