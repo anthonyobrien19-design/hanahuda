@@ -127,7 +127,12 @@ class Game {
   Player get currentPlayer => players[current];
 
   /// Forced capture: if any hand card matches a table card, only those may be played.
+  /// When false (default) any hand card may be played; a card that matches a table
+  /// set captures it. When true, a matching card must be played if one exists.
+  bool mustCapture = false;
+
   List<HCard> legalPlays(Player p) {
+    if (!mustCapture) return List.of(p.hand);
     final m = p.hand.where((c) => table.any((t) => t.set == c.set)).toList();
     return m.isNotEmpty ? m : List.of(p.hand);
   }

@@ -8,6 +8,7 @@ import 'package:audioplayers/audioplayers.dart';
 import 'package:flutter/material.dart';
 import 'hanahuda_engine.dart';
 import 'hanahuda_ai.dart';
+import 'online.dart';
 
 void main() => runApp(const HanahudaApp());
 
@@ -99,7 +100,17 @@ class FeltPainter extends CustomPainter {
   bool shouldRepaint(covariant CustomPainter old) => false;
 }
 
-Widget gameBackground() => Stack(fit: StackFit.expand, children: [
+/// Set to true to use assets/backgrounds/table.jpg instead of the green felt.
+const bool kUseImageBackground = false;
+
+Widget _felt() => Container(
+      decoration: const BoxDecoration(
+        gradient: RadialGradient(center: Alignment(0, -0.2), radius: 1.1, colors: [Color(0xFF2E7D4F), Color(0xFF14412A), Color(0xFF0A2417)]),
+      ),
+      child: CustomPaint(painter: FeltPainter()),
+    );
+
+Widget gameBackground() => !kUseImageBackground ? _felt() : Stack(fit: StackFit.expand, children: [
       Image.asset(
         'assets/backgrounds/table.jpg',
         fit: BoxFit.cover,
@@ -129,10 +140,96 @@ class _SetupScreenState extends State<SetupScreen> {
   int players = 2;
   int target = 5000;
 
+  Future<String?> _askText(String title, String hint, {int max = 12, bool upper = false}) {
+    final c = TextEditingController();
+    return showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text(title),
+        content: TextField(
+          controller: c,
+          autofocus: true,
+          maxLength: max,
+          textCapitalization: upper ? TextCapitalization.characters : TextCapitalization.words,
+          decoration: InputDecoration(hintText: hint),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
+          FilledButton(onPressed: () => Navigator.pop(ctx, c.text.trim()), child: const Text('OK')),
+        ],
+      ),
+    );
+  }
+
+  void _msg(String t) => ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(t)));
+
+  Future<void> _host() async {
+    if (!Rtdb.configured) {
+      _msg('Online play is not set up yet. Add your database URL in online.dart.');
+      return;
+    }
+    final nick = await _askText('Pick a nickname', 'Nickname');
+    if (nick == null || nick.isEmpty) return;
+    try {
+      String code;
+      do {
+        code = newRoomCode();
+      } while (await Rtdb.get('rooms/$code') != null);
+      await Rtdb.put('rooms/$code', {
+        'lobby': {'host': nick, 'n': players, 'target': target, 'started': false, 'seats': {'0': nick}},
+      });
+      if (!mounted) return;
+      Navigator.push(context, MaterialPageRoute(builder: (_) => LobbyScreen(nick: nick, code: code, isHost: true, mySeat: 0, n: players, target: target)));
+    } catch (e) {
+      _msg('Could not create the game: $e');
+    }
+  }
+
+  Future<void> _join() async {
+    if (!Rtdb.configured) {
+      _msg('Online play is not set up yet. Add your database URL in online.dart.');
+      return;
+    }
+    final nick = await _askText('Pick a nickname', 'Nickname');
+    if (nick == null || nick.isEmpty) return;
+    final code = await _askText('Enter the game code', 'ABCD', max: 4, upper: true);
+    if (code == null || code.length != 4) return;
+    try {
+      final lobby = await Rtdb.get('rooms/$code/lobby');
+      if (lobby is! Map) {
+        _msg('No game found with that code.');
+        return;
+      }
+      if (lobby['started'] == true) {
+        _msg('That game has already started.');
+        return;
+      }
+      final n = (lobby['n'] as num).toInt();
+      final tgt = (lobby['target'] as num).toInt();
+      final seats = keyed(lobby['seats']);
+      var seat = -1;
+      for (var i = 1; i < n; i++) {
+        if (seats['$i'] == null) {
+          seat = i;
+          break;
+        }
+      }
+      if (seat < 0) {
+        _msg('That game is full.');
+        return;
+      }
+      await Rtdb.put('rooms/$code/lobby/seats/$seat', nick);
+      if (!mounted) return;
+      Navigator.push(context, MaterialPageRoute(builder: (_) => LobbyScreen(nick: nick, code: code, isHost: false, mySeat: seat, n: n, target: tgt)));
+    } catch (e) {
+      _msg('Could not join: $e');
+    }
+  }
+
   @override
   Widget build(BuildContext context) => Scaffold(
         body: SafeArea(
-          child: Padding(
+          child: Center(child: ConstrainedBox(constraints: const BoxConstraints(maxWidth: 480), child: Padding(
             padding: const EdgeInsets.all(24),
             child: Column(
               mainAxisAlignment: MainAxisAlignment.center,
@@ -171,11 +268,19 @@ class _SetupScreenState extends State<SetupScreen> {
                     context,
                     MaterialPageRoute(builder: (_) => GameScreen(playerCount: players, target: target)),
                   ),
-                  child: const Padding(padding: EdgeInsets.all(12), child: Text('Start', style: TextStyle(fontSize: 18))),
+                  child: const Padding(padding: EdgeInsets.all(12), child: Text('Play vs computer', style: TextStyle(fontSize: 18))),
                 ),
+                const SizedBox(height: 12),
+                Row(children: [
+                  Expanded(child: OutlinedButton(onPressed: _host, child: const Padding(padding: EdgeInsets.all(12), child: Text('Host a game', style: TextStyle(fontSize: 16))))),
+                  const SizedBox(width: 12),
+                  Expanded(child: OutlinedButton(onPressed: _join, child: const Padding(padding: EdgeInsets.all(12), child: Text('Join a game', style: TextStyle(fontSize: 16))))),
+                ]),
+                const SizedBox(height: 16),
+                const Text('Build 4', textAlign: TextAlign.center, style: TextStyle(fontSize: 11, color: Colors.white54)),
               ],
             ),
-          ),
+          ))),
         ),
       );
 }
@@ -204,12 +309,12 @@ String _typeLabel(CardType t) {
 class CardPreview {
   static OverlayEntry? _entry;
 
-  static void show(BuildContext context, HCard card) {
+  static void show(BuildContext context, HCard card, {bool scrim = true}) {
     hide();
     final entry = OverlayEntry(
       builder: (_) => IgnorePointer(
         child: Container(
-          color: Colors.black54,
+          color: scrim ? Colors.black54 : Colors.transparent,
           alignment: Alignment.center,
           child: CardView(card: card, width: 230),
         ),
@@ -231,12 +336,21 @@ class CardView extends StatelessWidget {
   final bool highlight;
   final bool dim;
   final VoidCallback? onTap;
-  const CardView({super.key, required this.card, this.width = 52, this.highlight = false, this.dim = false, this.onTap});
+  final bool hover;
+  const CardView({super.key, required this.card, this.width = 52, this.highlight = false, this.dim = false, this.onTap, this.hover = false});
 
   Widget _placeholder() => SizedBox.expand(child: CustomPaint(painter: CardArt(card)));
 
   @override
-  Widget build(BuildContext context) => GestureDetector(
+  Widget build(BuildContext context) => hover
+      ? MouseRegion(
+          onEnter: (_) => CardPreview.show(context, card, scrim: false),
+          onExit: (_) => CardPreview.hide(),
+          child: _body(context),
+        )
+      : _body(context);
+
+  Widget _body(BuildContext context) => GestureDetector(
         onTap: onTap,
         onLongPressStart: (_) => CardPreview.show(context, card),
         onLongPressEnd: (_) => CardPreview.hide(),
@@ -455,17 +569,176 @@ class CardArt extends CustomPainter {
   bool shouldRepaint(covariant CardArt old) => old.card != card;
 }
 
+// ---------------------------------------------------------------- Lobby
+class LobbyScreen extends StatefulWidget {
+  final String nick;
+  final String code;
+  final bool isHost;
+  final int mySeat;
+  final int n;
+  final int target;
+  const LobbyScreen({super.key, required this.nick, required this.code, required this.isHost, required this.mySeat, required this.n, required this.target});
+  @override
+  State<LobbyScreen> createState() => _LobbyScreenState();
+}
+
+class _LobbyScreenState extends State<LobbyScreen> {
+  late int mySeat = widget.mySeat;
+  Map<String, dynamic> seats = {};
+  Timer? _t;
+  bool _go = false;
+  String? error;
+
+  @override
+  void initState() {
+    super.initState();
+    _t = Timer.periodic(const Duration(milliseconds: 1500), (_) => _poll());
+    _poll();
+  }
+
+  @override
+  void dispose() {
+    _t?.cancel();
+    if (!_go) {
+      if (widget.isHost) {
+        Rtdb.delete('rooms/${widget.code}');
+      } else {
+        Rtdb.delete('rooms/${widget.code}/lobby/seats/$mySeat');
+      }
+    }
+    super.dispose();
+  }
+
+  Future<void> _poll() async {
+    try {
+      final l = await Rtdb.get('rooms/${widget.code}/lobby');
+      if (!mounted) return;
+      if (l is! Map) {
+        setState(() => error = 'The host closed this game.');
+        return;
+      }
+      final s = keyed(l['seats']);
+      setState(() {
+        seats = s;
+        error = null;
+      });
+      if (!widget.isHost && l['started'] == true && !_go) {
+        _go = true;
+        _t?.cancel();
+        _launch(s);
+      }
+    } catch (_) {}
+  }
+
+  void _launch(Map<String, dynamic> s) {
+    final nicks = List<String?>.generate(widget.n, (i) => s['$i']?.toString());
+    Navigator.pushReplacement(
+      context,
+      MaterialPageRoute(
+        builder: (_) => GameScreen(
+          playerCount: widget.n,
+          target: widget.target,
+          online: OnlineConfig(code: widget.code, isHost: widget.isHost, mySeat: mySeat, seatNicks: nicks),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _start() async {
+    try {
+      await Rtdb.patch('rooms/${widget.code}/lobby', {'started': true});
+    } catch (_) {}
+    _go = true;
+    _t?.cancel();
+    if (mounted) _launch(seats);
+  }
+
+  Future<void> _sit(int seat) async {
+    if (widget.isHost || seat == mySeat || seats['$seat'] != null) return;
+    try {
+      await Rtdb.put('rooms/${widget.code}/lobby/seats/$seat', widget.nick);
+      await Rtdb.delete('rooms/${widget.code}/lobby/seats/$mySeat');
+      if (mounted) setState(() => mySeat = seat);
+    } catch (_) {}
+  }
+
+  Widget _seat(int i, {String? teamLabel}) {
+    final nick = seats['$i']?.toString();
+    final mine = i == mySeat;
+    final open = nick == null;
+    return Card(
+      color: mine ? Colors.amber.withOpacity(0.25) : null,
+      child: ListTile(
+        leading: Icon(open ? Icons.smart_toy : Icons.person),
+        title: Text(open ? 'Open seat (computer plays)' : nick, style: const TextStyle(fontSize: 17)),
+        subtitle: teamLabel == null ? null : Text(teamLabel),
+        trailing: (!widget.isHost && open) ? const Text('Sit here') : (mine ? const Text('You') : null),
+        onTap: (!widget.isHost && open) ? () => _sit(i) : null,
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final n = widget.n;
+    final kids = <Widget>[
+      const SizedBox(height: 8),
+      const Text('Game code', textAlign: TextAlign.center),
+      Text(widget.code, textAlign: TextAlign.center, style: const TextStyle(fontSize: 52, fontWeight: FontWeight.bold, letterSpacing: 8)),
+      const Text('Friends join with this code.', textAlign: TextAlign.center),
+      const SizedBox(height: 16),
+    ];
+    if (n == 4) {
+      kids.addAll([
+        const Text('Team A (seats across from each other)', style: TextStyle(fontWeight: FontWeight.w600)),
+        _seat(0, teamLabel: 'Host'),
+        _seat(2, teamLabel: "Host's teammate"),
+        const SizedBox(height: 8),
+        const Text('Team B', style: TextStyle(fontWeight: FontWeight.w600)),
+        _seat(1),
+        _seat(3, teamLabel: "Teammate of seat 2 player"),
+      ]);
+    } else {
+      for (var i = 0; i < n; i++) {
+        kids.add(_seat(i, teamLabel: i == 0 ? 'Host' : null));
+      }
+    }
+    kids.add(const SizedBox(height: 12));
+    kids.add(Text(
+      widget.isHost ? 'Empty seats are played by the computer. Start when everyone is in.' : 'Pick a seat. Sitting across from someone makes you teammates in a 4-player game.',
+      textAlign: TextAlign.center,
+    ));
+    if (error != null) kids.add(Padding(padding: const EdgeInsets.only(top: 8), child: Text(error!, textAlign: TextAlign.center, style: const TextStyle(color: Colors.redAccent))));
+    kids.add(const SizedBox(height: 12));
+    kids.add(widget.isHost
+        ? FilledButton(onPressed: _start, child: const Padding(padding: EdgeInsets.all(12), child: Text('Start game', style: TextStyle(fontSize: 18))))
+        : const Center(child: Text('Waiting for the host to start...', style: TextStyle(fontSize: 16))));
+    return Scaffold(
+      appBar: AppBar(title: Text('Game ${widget.code}')),
+      body: SafeArea(
+        child: Center(
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 520),
+            child: ListView(padding: const EdgeInsets.all(16), children: kids),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 // ---------------------------------------------------------------- Game
 class GameScreen extends StatefulWidget {
   final int playerCount;
   final int target;
-  const GameScreen({super.key, required this.playerCount, required this.target});
+  final OnlineConfig? online;
+  const GameScreen({super.key, required this.playerCount, required this.target, this.online});
   @override
   State<GameScreen> createState() => _GameScreenState();
 }
 
 class _GameScreenState extends State<GameScreen> {
-  late final Game game;
+  late Game game;
   final ai = HanahudaAI();
   final Map<int, int> totals = {};
   String message = '';
@@ -475,32 +748,262 @@ class _GameScreenState extends State<GameScreen> {
   Completer<HCard>? _handPick;
   Completer<HCard>? _tablePick;
 
+  // ---- online state ----
+  final Set<int> _remote = {}; // host: seats played by other people
+  Map<int, List<int>> _awaitLegal = {};
+  final Map<int, int> _lastAction = {};
+  Timer? _clientTimer;
+  bool _publishing = false, _dirty = false, _polling = false, _everSaw = false;
+  int _ver = 0, _actionN = 0, _noticeId = 0, _misses = 0;
+  int? _seenNotice;
+  HCard? _peekCard; // bottom card of the stack, seen only by the first player and partner
+  Set<int> _peekSeats = {};
+  Map<String, dynamic>? _notice;
+
   @override
   void initState() {
     super.initState();
     final n = widget.playerCount;
+    final o = widget.online;
+    String nameFor(int i) {
+      if (o != null) {
+        final nick = i < o.seatNicks.length ? o.seatNicks[i] : null;
+        return (nick != null && nick.isNotEmpty) ? nick : 'CPU $i';
+      }
+      return i == 0 ? 'You' : (n == 4 && i == 2 ? 'Partner' : 'CPU $i');
+    }
+
     game = Game([
-      for (var i = 0; i < n; i++) Player(i == 0 ? 'You' : (n == 4 && i == 2 ? 'Partner' : 'CPU $i'), n == 4 ? i % 2 : i),
+      for (var i = 0; i < n; i++) Player(nameFor(i), n == 4 ? i % 2 : i),
     ]);
     for (final t in game.teamPiles.keys) {
       totals[t] = 0;
     }
+    if (o != null) {
+      for (var i = 1; i < n; i++) {
+        if (i < o.seatNicks.length && o.seatNicks[i] != null) _remote.add(i);
+      }
+    }
     AudioManager.instance.startMusic();
-    WidgetsBinding.instance.addPostFrameCallback((_) => _playMatch());
+    if (o != null && !o.isHost) {
+      _clientTimer = Timer.periodic(const Duration(milliseconds: 900), (_) => _pollClient());
+      WidgetsBinding.instance.addPostFrameCallback((_) => _pollClient());
+    } else {
+      WidgetsBinding.instance.addPostFrameCallback((_) => _playMatch());
+    }
   }
 
   @override
   void dispose() {
+    _clientTimer?.cancel();
+    final o = widget.online;
+    if (o != null && o.isHost) Rtdb.delete('rooms/${o.code}');
     AudioManager.instance.stopMusic();
     super.dispose();
   }
 
   String teamName(int t) {
-    if (t == 0) return widget.playerCount == 4 ? 'Your team' : 'You';
-    return widget.playerCount == 4 ? 'Opponents' : 'CPU $t';
+    if (widget.playerCount == 4) return t == 0 ? 'Your team' : 'Opponents';
+    if (t == 0) return 'You';
+    final names = game.players.where((p) => p.team == t).map((p) => p.name).toList();
+    return names.isEmpty ? 'CPU $t' : names.join(' & ');
   }
 
-  Future<void> _delay(int ms) => Future.delayed(Duration(milliseconds: ms));
+  /// Team label that reads the same for every player (used in shared messages).
+  String _tn(int t) {
+    if (widget.online == null) return teamName(t);
+    final names = game.players.where((p) => p.team == t).map((p) => p.name).toList();
+    return names.isEmpty ? 'Team $t' : names.join(' & ');
+  }
+
+  Future<void> _delay(int ms) {
+    _publish();
+    return Future.delayed(Duration(milliseconds: ms));
+  }
+
+  void _setNotice(String title, String body, {bool end = false}) {
+    _notice = {'id': ++_noticeId, 'title': title, 'body': body, 'end': end};
+    _publish();
+  }
+
+  // ---- Host: publish the game so other players can see it ----
+  Future<void> _publish() async {
+    final o = widget.online;
+    if (o == null || !o.isHost) return;
+    if (_publishing) {
+      _dirty = true;
+      return;
+    }
+    _publishing = true;
+    try {
+      do {
+        _dirty = false;
+        _ver++;
+        final msg = message.startsWith('Your turn') ? "${game.players[0].name}'s turn" : message;
+        final state = <String, Object?>{
+          'v': _ver,
+          'names': [for (final p in game.players) p.name],
+          'teams': [for (final p in game.players) p.team],
+          'counts': [for (final p in game.players) p.hand.length],
+          'table': [for (final c in game.table) c.id],
+          'stack': game.stack.length,
+          'piles': {for (final e in game.teamPiles.entries) '${e.key}': [for (final c in e.value) c.id]},
+          'current': game.current,
+          'dealer': game.dealer,
+          'message': msg,
+          'flipped': flipped?.id ?? -1,
+          'totals': {for (final e in totals.entries) '${e.key}': e.value},
+          'notice': _notice,
+          'peek': (_peekCard != null && game.stack.isNotEmpty && game.stack.first == _peekCard) ? _peekCard!.id : -1,
+          'peekSeats': _peekSeats.toList(),
+        };
+        await Rtdb.put('rooms/${o.code}/state', state);
+        for (final seat in _remote) {
+          await Rtdb.put('rooms/${o.code}/hands/$seat', {
+            'hand': [for (final c in game.players[seat].hand) c.id],
+            'legal': _awaitLegal[seat] ?? <int>[],
+          });
+        }
+      } while (_dirty);
+    } catch (_) {
+    } finally {
+      _publishing = false;
+    }
+  }
+
+  // ---- Host: wait for another person's move ----
+  Future<int> _waitRemoteAction(int seat, List<int> legalIds) async {
+    final o = widget.online!;
+    final clock = Stopwatch()..start();
+    while (mounted) {
+      try {
+        final a = await Rtdb.get('rooms/${o.code}/actions/$seat');
+        if (a is Map) {
+          final n = (a['n'] as num).toInt();
+          final id = (a['id'] as num).toInt();
+          if (n > (_lastAction[seat] ?? 0)) {
+            _lastAction[seat] = n;
+            if (legalIds.contains(id)) return id;
+          }
+        }
+      } catch (_) {}
+      if (clock.elapsed.inSeconds > 120) return legalIds.first; // player went away
+      await Future.delayed(const Duration(milliseconds: 700));
+    }
+    return legalIds.first;
+  }
+
+  Future<RoundResult?> _remoteTurn(int seat) async {
+    final p = game.players[seat];
+    final legalCards = game.legalPlays(p);
+    final ids = [for (final c in legalCards) c.id];
+    _awaitLegal = {seat: ids};
+    setState(() => message = "${p.name}'s turn");
+    await _publish();
+    final id = await _waitRemoteAction(seat, ids);
+    _awaitLegal = {};
+    if (!mounted) return null;
+    final card = legalCards.firstWhere((c) => c.id == id, orElse: () => legalCards.first);
+    final opts = game.captureOptions(card);
+    setState(() {
+      message = '${p.name} plays ${setNames[card.set]}#${card.index}';
+      game.playFromHand(card, capture: opts.isEmpty ? null : opts.first);
+    });
+    AudioManager.instance.sfx(opts.isNotEmpty ? 'capture' : 'deal');
+    await _delay(500);
+    return _flipPhase(human: false);
+  }
+
+  // ---- Client: read the host's game and show it from my seat ----
+  Future<void> _pollClient() async {
+    final o = widget.online;
+    if (o == null || _polling || !mounted) return;
+    _polling = true;
+    try {
+      final s = await Rtdb.get('rooms/${o.code}/state');
+      final h = await Rtdb.get('rooms/${o.code}/hands/${o.mySeat}');
+      if (!mounted) return;
+      if (s is Map) {
+        _everSaw = true;
+        _misses = 0;
+        _apply(s, h);
+      } else if (_everSaw && ++_misses >= 3) {
+        _clientTimer?.cancel();
+        await _dialog<void>('Game ended', 'The host left the game.', (ctx) => [TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('OK'))]);
+        if (mounted) Navigator.pop(context);
+      }
+    } catch (_) {
+    } finally {
+      _polling = false;
+    }
+  }
+
+  void _apply(Map s, dynamic h) {
+    final o = widget.online!;
+    final n = widget.playerCount;
+    final my = o.mySeat;
+    final names = [for (final x in asList(s['names'])) '$x'];
+    final teams = [for (final x in asList(s['teams'])) (x as num).toInt()];
+    final counts = [for (final x in asList(s['counts'])) (x as num).toInt()];
+    if (names.length < n || teams.length < n || counts.length < n) return;
+    final tmap = <int, int>{teams[my]: 0};
+    var next = 1;
+    for (var i = 1; i < n; i++) {
+      tmap.putIfAbsent(teams[(my + i) % n], () => next++);
+    }
+    final players = <Player>[];
+    for (var i = 0; i < n; i++) {
+      final seat = (my + i) % n;
+      final p = Player(names[seat], tmap[teams[seat]]!);
+      if (i == 0) {
+        p.hand.addAll([for (final id in asIds(h is Map ? h['hand'] : null)) cardFromId(id)]);
+      } else {
+        p.hand.addAll(List.generate(counts[seat], (_) => const HCard(0, 0)));
+      }
+      players.add(p);
+    }
+    final g = Game(players, dealer: ((s['dealer'] as num).toInt() - my + n) % n);
+    g.table.addAll(asIds(s['table']).map(cardFromId));
+    g.stack.addAll(List.generate((s['stack'] as num).toInt(), (_) => const HCard(0, 0)));
+    keyed(s['piles']).forEach((k, v) {
+      final t = tmap[int.tryParse(k)];
+      if (t != null) g.teamPiles[t]!.addAll(asIds(v).map(cardFromId));
+    });
+    g.current = ((s['current'] as num).toInt() - my + n) % n;
+    final tot = <int, int>{for (final t in g.teamPiles.keys) t: 0};
+    keyed(s['totals']).forEach((k, v) {
+      final t = tmap[int.tryParse(k)];
+      if (t != null) tot[t] = (v as num).toInt();
+    });
+    final lg = h is Map ? asIds(h['legal']) : <int>[];
+    final fl = (s['flipped'] as num?)?.toInt() ?? -1;
+    setState(() {
+      game = g;
+      totals
+        ..clear()
+        ..addAll(tot);
+      legal = {for (final id in lg) cardFromId(id)};
+      flipped = fl >= 0 ? cardFromId(fl) : null;
+      message = lg.isNotEmpty ? 'Your turn: play a card' : '${s['message'] ?? ''}';
+      final pid = (s['peek'] as num?)?.toInt() ?? -1;
+      _peekCard = (pid >= 0 && asIds(s['peekSeats']).contains(my)) ? cardFromId(pid) : null;
+    });
+    final nt = s['notice'];
+    if (nt is Map) {
+      final id = (nt['id'] as num).toInt();
+      if (_seenNotice == null) {
+        _seenNotice = id;
+      } else if (id != _seenNotice) {
+        _seenNotice = id;
+        _showNotice('${nt['title']}', '${nt['body']}', nt['end'] == true);
+      }
+    }
+  }
+
+  Future<void> _showNotice(String title, String body, bool end) async {
+    await _dialog<void>(title, body, (ctx) => [TextButton(onPressed: () => Navigator.pop(ctx), child: Text(end ? 'OK' : 'Continue'))]);
+    if (end && mounted) Navigator.pop(context);
+  }
 
   Future<T?> _dialog<T>(String title, String body, List<Widget> Function(BuildContext) actions) =>
       showDialog<T>(
@@ -516,7 +1019,8 @@ class _GameScreenState extends State<GameScreen> {
       if (!mounted) return;
       final best = totals.values.reduce(max);
       if (best >= widget.target) {
-        final winners = totals.entries.where((e) => e.value == best).map((e) => teamName(e.key)).join(' & ');
+        final winners = totals.entries.where((e) => e.value == best).map((e) => _tn(e.key)).join(' & ');
+        _setNotice('Match over', '$winners reached ${widget.target}!\n\n${_totalsText()}', end: true);
         await _dialog<void>('Match over', '$winners reached ${widget.target}!\n\n${_totalsText()}',
             (ctx) => [TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('OK'))]);
         if (mounted) Navigator.pop(context);
@@ -525,7 +1029,7 @@ class _GameScreenState extends State<GameScreen> {
     }
   }
 
-  String _totalsText() => totals.entries.map((e) => '${teamName(e.key)}: ${e.value}').join('\n');
+  String _totalsText() => totals.entries.map((e) => '${_tn(e.key)}: ${e.value}').join('\n');
 
   Future<void> _playRound() async {
     game.deal();
@@ -536,10 +1040,17 @@ class _GameScreenState extends State<GameScreen> {
     });
     await _delay(800);
     await _chitsiobiki();
+    final firstSeat = (game.dealer + 1) % game.players.length;
+    _peekSeats = {firstSeat, if (game.players.length == 4) (firstSeat + 2) % 4};
+    _peekCard = game.stack.isEmpty ? null : game.stack.first;
+    if (_peekSeats.contains(0) && _peekCard != null) {
+      setState(() => message = 'You can see the bottom card of the stack.');
+      await _delay(1200);
+    }
     RoundResult? result;
     while (!game.roundOver) {
-      final isHuman = game.current == 0;
-      final early = isHuman ? await _humanTurn() : await _aiTurn();
+      final cur = game.current;
+      final early = cur == 0 ? await _humanTurn() : (_remote.contains(cur) ? await _remoteTurn(cur) : await _aiTurn());
       if (!mounted) return;
       if (early != null) {
         result = early;
@@ -553,13 +1064,14 @@ class _GameScreenState extends State<GameScreen> {
     final lines = StringBuffer();
     for (final e in game.teamPiles.entries) {
       final yaks = scoreYaks(e.value);
-      lines.writeln('${teamName(e.key)}: ${r.yakScores[e.key] ?? 0}');
+      lines.writeln('${_tn(e.key)}: ${r.yakScores[e.key] ?? 0}');
       if (yaks.isNotEmpty) lines.writeln('  ${yaks.keys.join(', ')}');
     }
     if (r.yakScores.values.any((v) => v > 0)) AudioManager.instance.sfx('yak');
-    final head = r.winnerTeam == null ? 'Tie' : '${teamName(r.winnerTeam!)} won the round';
+    final head = r.winnerTeam == null ? 'Tie' : '${_tn(r.winnerTeam!)} won the round';
     if (!mounted) return;
     setState(() {});
+    _setNotice(head, '$lines\nTotals\n${_totalsText()}');
     await _dialog<void>(head, '$lines\nTotals\n${_totalsText()}',
         (ctx) => [TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Next round'))]);
     game.nextRound(r);
@@ -699,6 +1211,14 @@ class _GameScreenState extends State<GameScreen> {
 
   // ---- Input ----
   void _onHandTap(HCard c) {
+    final o = widget.online;
+    if (o != null && !o.isHost) {
+      if (legal.contains(c)) {
+        setState(() => legal = {});
+        Rtdb.put('rooms/${o.code}/actions/${o.mySeat}', {'n': ++_actionN, 'id': c.id}).catchError((_) {});
+      }
+      return;
+    }
     final p = _handPick;
     if (p != null && !p.isCompleted && legal.contains(c)) p.complete(c);
   }
@@ -721,7 +1241,7 @@ class _GameScreenState extends State<GameScreen> {
             width: cw + 6 + max(0, cards.length - 1) * step,
             height: cw * 1.6 + 6,
             child: Stack(children: [
-              for (var i = 0; i < cards.length; i++) Positioned(left: i * step, child: CardView(card: cards[i], width: cw)),
+              for (var i = 0; i < cards.length; i++) Positioned(left: i * step, child: CardView(card: cards[i], width: cw, hover: true)),
             ]),
           ),
         ],
@@ -736,7 +1256,7 @@ class _GameScreenState extends State<GameScreen> {
       if (cards.isEmpty) return const SizedBox.shrink();
       return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
         Padding(padding: const EdgeInsets.only(top: 8), child: Text('$label (${cards.length})', style: const TextStyle(fontWeight: FontWeight.w600))),
-        Wrap(children: [for (final c in cards) CardView(card: c, width: 44)]),
+        Wrap(children: [for (final c in cards) CardView(card: c, width: 44, hover: true)]),
       ]);
     }
 
@@ -763,7 +1283,10 @@ class _GameScreenState extends State<GameScreen> {
     final pile = game.teamPiles[team]!;
     List<HCard> of(CardType t) => pile.where((c) => c.type == t).toList();
     final yaks = scoreYaks(pile);
-    return Container(
+    return GestureDetector(
+      behavior: HitTestBehavior.translucent,
+      onTap: () => _showPile(team),
+      child: Container(
       width: double.infinity,
       margin: const EdgeInsets.only(bottom: 4),
       padding: const EdgeInsets.all(6),
@@ -772,10 +1295,12 @@ class _GameScreenState extends State<GameScreen> {
         borderRadius: BorderRadius.circular(8),
       ),
       child: Column(crossAxisAlignment: CrossAxisAlignment.center, children: [
-        GestureDetector(
-          onTap: () => _showPile(team),
-          child: Text('${teamName(team)} captured (${pile.length})  - tap to enlarge', style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
-        ),
+        Row(mainAxisSize: MainAxisSize.min, children: [
+          Flexible(
+            child: Text('${teamName(team)} captured (${pile.length})', overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
+          ),
+          IconButton(tooltip: 'Enlarge', icon: const Icon(Icons.zoom_out_map), onPressed: () => _showPile(team)),
+        ]),
         _centeredRow([
           _pileColumn('okeiim', of(CardType.okeiim), cardW),
           _pileColumn('tang', of(CardType.tang), cardW),
@@ -784,7 +1309,7 @@ class _GameScreenState extends State<GameScreen> {
         ], cross: CrossAxisAlignment.start),
         if (yaks.isNotEmpty) Text('Yaks: ${yaks.keys.join(', ')}', style: const TextStyle(color: Colors.amber, fontSize: 15)),
       ]),
-    );
+    ));
   }
 
   Widget _opponents() => Wrap(
@@ -813,33 +1338,65 @@ class _GameScreenState extends State<GameScreen> {
         ),
       );
 
-  Widget _tableArea() => SingleChildScrollView(
-        child: Column(children: [
-          Row(mainAxisAlignment: MainAxisAlignment.center, children: [
-            Container(
-              width: _tw,
-              height: _tw * 1.6,
-              margin: const EdgeInsets.all(2),
-              decoration: BoxDecoration(color: Colors.green.shade900, borderRadius: BorderRadius.circular(5), border: Border.all(color: Colors.white24)),
-              child: Center(child: Text('${game.stack.length}', style: const TextStyle(fontSize: 18))),
+  bool get _showPeek {
+    final o = widget.online;
+    if (o != null && !o.isHost) return _peekCard != null;
+    return _peekCard != null && _peekSeats.contains(0) && game.stack.isNotEmpty && game.stack.first == _peekCard;
+  }
+
+  double _groupWidth(List<HCard> g) => g.length == 1 ? _tw + 4 : _tw + 8 + (g.length - 1) * _tw * 0.3;
+
+  /// The draw stack sits in the middle of the table and the table cards are laid around it.
+  Widget _tableArea() => LayoutBuilder(builder: (ctx, box) {
+        final cw = _tw, ch = _tw * 1.6;
+        final cx = box.maxWidth / 2, cy = box.maxHeight / 2;
+        final rx = max(40.0, box.maxWidth / 2 - cw * 0.9);
+        final ry = max(30.0, box.maxHeight / 2 - ch * 0.7);
+        final groups = _tableGroups();
+        final n = groups.length;
+        final peekW = cw * 0.75;
+        final stackLeft = cx - cw / 2;
+        final kids = <Widget>[
+          Positioned(
+            left: stackLeft,
+            top: cy - ch / 2,
+            child: Container(
+              width: cw,
+              height: ch,
+              decoration: BoxDecoration(color: Colors.green.shade900, borderRadius: BorderRadius.circular(5), border: Border.all(color: Colors.white54, width: 2)),
+              child: Center(child: Text('${game.stack.length}', style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w600))),
             ),
-            if (flipped != null) CardView(card: flipped!, width: _tw, highlight: true),
-          ]),
-          const SizedBox(height: 8),
-          const Text('Table', style: TextStyle(fontSize: 16)),
-          Wrap(
-            alignment: WrapAlignment.center,
-            runAlignment: WrapAlignment.center,
-            children: [for (final g in _tableGroups()) _tableGroup(g)],
           ),
-        ]),
-      );
+          if (flipped != null) Positioned(left: stackLeft + cw + 8, top: cy - ch / 2, child: CardView(card: flipped!, width: cw, highlight: true)),
+          if (_showPeek)
+            Positioned(
+              left: stackLeft - peekW - 14,
+              top: cy - peekW * 0.8,
+              child: Column(mainAxisSize: MainAxisSize.min, children: [
+                const Text('Bottom card', style: TextStyle(fontSize: 12)),
+                CardView(card: _peekCard!, width: peekW, hover: true),
+              ]),
+            ),
+        ];
+        for (var i = 0; i < n; i++) {
+          final g = groups[i];
+          final ang = -pi / 2 + 2 * pi * i / n;
+          kids.add(AnimatedPositioned(
+            key: ValueKey('tg${g.first.set}'),
+            duration: const Duration(milliseconds: 250),
+            left: cx + rx * cos(ang) - _groupWidth(g) / 2,
+            top: cy + ry * sin(ang) - ch / 2,
+            child: _tableGroup(g),
+          ));
+        }
+        return SizedBox(width: box.maxWidth, height: box.maxHeight, child: Stack(clipBehavior: Clip.none, children: kids));
+      });
 
   Widget _handRow(List<HCard> hand) => SizedBox(
         height: _hw * 1.6 + 8,
         child: _centeredRow([
           for (final c in hand)
-            CardView(card: c, width: _hw, highlight: legal.contains(c), dim: legal.isNotEmpty && !legal.contains(c), onTap: () => _onHandTap(c)),
+            CardView(card: c, width: _hw, highlight: legal.contains(c) && game.table.any((t) => t.set == c.set), onTap: () => _onHandTap(c)),
         ]),
       );
 
@@ -924,13 +1481,13 @@ class _GameScreenState extends State<GameScreen> {
             if (wide) {
               _tw = (h * 0.12).clamp(48.0, 90.0).toDouble();
               _hw = (h * 0.14).clamp(52.0, 100.0).toDouble();
-              _pwOpp = (h * 0.075).clamp(30.0, 54.0).toDouble();
-              _pwMine = (h * 0.075).clamp(30.0, 54.0).toDouble();
+              _pwOpp = (h * 0.095).clamp(36.0, 64.0).toDouble();
+              _pwMine = (h * 0.095).clamp(36.0, 64.0).toDouble();
             } else {
               _tw = (w / 8).clamp(44.0, 66.0).toDouble();
               _hw = (w / 6.5).clamp(50.0, 76.0).toDouble();
-              _pwOpp = (w / 12.5).clamp(24.0, 36.0).toDouble();
-              _pwMine = (w / 9.5).clamp(28.0, 42.0).toDouble();
+              _pwOpp = (w / 10.5).clamp(26.0, 40.0).toDouble();
+              _pwMine = (w / 8.5).clamp(30.0, 46.0).toDouble();
             }
             final oppPiles = [for (final t in game.teamPiles.keys.where((t) => t != 0)) _teamPile(t, cardW: _pwOpp)];
             final board = Column(children: [
@@ -952,7 +1509,7 @@ class _GameScreenState extends State<GameScreen> {
               _handRow(hand),
               const SizedBox(height: 6),
             ]);
-            final panelW = min(w * 0.28, 420.0);
+            final panelW = min(w * 0.31, 460.0);
             final content = wide
                 ? Row(children: [
                     SizedBox(
