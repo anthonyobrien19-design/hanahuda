@@ -6,6 +6,7 @@ import 'dart:async';
 import 'dart:math';
 import 'package:audioplayers/audioplayers.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'hanahuda_engine.dart';
 import 'hanahuda_ai.dart';
 import 'online.dart';
@@ -31,6 +32,9 @@ class HanahudaApp extends StatelessWidget {
 // Optional files (the game stays silent if a file is missing):
 //   assets/music/theme.mp3          looping background music
 //   assets/sfx/deal.mp3, capture.mp3, flip.mp3, yak.mp3
+/// Background music files in assets/music/. One file loops; several play one after another.
+const List<String> kMusicTracks = ['theme.mp3'];
+
 class AudioManager {
   AudioManager._();
   static final AudioManager instance = AudioManager._();
@@ -42,16 +46,31 @@ class AudioManager {
   String musicStatus = 'not started';
   String sfxStatus = 'not played yet';
 
+  int _trackIdx = 0;
+  StreamSubscription<void>? _sub;
+
+  Future<void> _playTrack() async {
+    final name = kMusicTracks[_trackIdx % kMusicTracks.length];
+    await _music.play(AssetSource('music/$name'));
+    musicStatus = 'playing assets/music/$name';
+  }
+
   Future<void> startMusic() async {
     if (!musicOn) return;
     try {
-      await _music.setReleaseMode(ReleaseMode.loop);
       await _music.setVolume(0.4);
-      await _music.play(AssetSource('music/theme.mp3'));
+      final many = kMusicTracks.length > 1;
+      await _music.setReleaseMode(many ? ReleaseMode.release : ReleaseMode.loop);
+      _sub ??= _music.onPlayerComplete.listen((_) {
+        if (many && _started) {
+          _trackIdx = (_trackIdx + 1) % kMusicTracks.length;
+          _playTrack();
+        }
+      });
+      await _playTrack();
       _started = true;
-      musicStatus = 'playing assets/music/theme.mp3';
     } catch (e) {
-      musicStatus = 'cannot play assets/music/theme.mp3: $e';
+      musicStatus = 'cannot play music: $e';
     }
   }
 
@@ -136,12 +155,25 @@ class SetupScreen extends StatefulWidget {
   State<SetupScreen> createState() => _SetupScreenState();
 }
 
+String _lastNick = '';
+
 class _SetupScreenState extends State<SetupScreen> {
   int players = 2;
   int target = 5000;
+  bool listPublicly = true;
 
-  Future<String?> _askText(String title, String hint, {int max = 12, bool upper = false}) {
-    final c = TextEditingController();
+  @override
+  void initState() {
+    super.initState();
+    // Invite links look like  https://.../hanahuda/?join=ABCD
+    final c = Uri.base.queryParameters['join'];
+    if (c != null && c.length == 4 && Rtdb.configured) {
+      WidgetsBinding.instance.addPostFrameCallback((_) => _join(preCode: c.toUpperCase()));
+    }
+  }
+
+  Future<String?> _askText(String title, String hint, {int max = 12, bool upper = false, String initial = ''}) {
+    final c = TextEditingController(text: initial);
     return showDialog<String>(
       context: context,
       builder: (ctx) => AlertDialog(
@@ -168,8 +200,9 @@ class _SetupScreenState extends State<SetupScreen> {
       _msg('Online play is not set up yet. Add your database URL in online.dart.');
       return;
     }
-    final nick = await _askText('Pick a nickname', 'Nickname');
+    final nick = await _askText('Pick a nickname', 'Nickname', initial: _lastNick);
     if (nick == null || nick.isEmpty) return;
+    _lastNick = nick;
     try {
       String code;
       do {
@@ -178,6 +211,9 @@ class _SetupScreenState extends State<SetupScreen> {
       await Rtdb.put('rooms/$code', {
         'lobby': {'host': nick, 'n': players, 'target': target, 'started': false, 'seats': {'0': nick}},
       });
+      if (listPublicly) {
+        await Rtdb.put('openGames/$code', {'host': nick, 'n': players, 'target': target, 't': DateTime.now().millisecondsSinceEpoch});
+      }
       if (!mounted) return;
       Navigator.push(context, MaterialPageRoute(builder: (_) => LobbyScreen(nick: nick, code: code, isHost: true, mySeat: 0, n: players, target: target)));
     } catch (e) {
@@ -185,15 +221,34 @@ class _SetupScreenState extends State<SetupScreen> {
     }
   }
 
-  Future<void> _join() async {
+  /// Join by typing a code (or from an invite link, which fills the code in).
+  Future<void> _join({String? preCode}) async {
     if (!Rtdb.configured) {
       _msg('Online play is not set up yet. Add your database URL in online.dart.');
       return;
     }
-    final nick = await _askText('Pick a nickname', 'Nickname');
+    final nick = await _askText('Pick a nickname', 'Nickname', initial: _lastNick);
     if (nick == null || nick.isEmpty) return;
-    final code = await _askText('Enter the game code', 'ABCD', max: 4, upper: true);
+    _lastNick = nick;
+    final code = preCode ?? await _askText('Enter the game code', 'ABCD', max: 4, upper: true);
     if (code == null || code.length != 4) return;
+    await _joinCode(code.toUpperCase(), nick);
+  }
+
+  Future<void> _browse() async {
+    if (!Rtdb.configured) {
+      _msg('Online play is not set up yet. Add your database URL in online.dart.');
+      return;
+    }
+    final code = await Navigator.push<String>(context, MaterialPageRoute(builder: (_) => const BrowseGamesScreen()));
+    if (code == null || !mounted) return;
+    final nick = await _askText('Pick a nickname', 'Nickname', initial: _lastNick);
+    if (nick == null || nick.isEmpty) return;
+    _lastNick = nick;
+    await _joinCode(code, nick);
+  }
+
+  Future<void> _joinCode(String code, String nick) async {
     try {
       final lobby = await Rtdb.get('rooms/$code/lobby');
       if (lobby is! Map) {
@@ -275,10 +330,21 @@ class _SetupScreenState extends State<SetupScreen> {
                 Row(children: [
                   Expanded(child: OutlinedButton(onPressed: _host, child: const Padding(padding: EdgeInsets.all(12), child: Text('Host a game', style: TextStyle(fontSize: 16))))),
                   const SizedBox(width: 12),
-                  Expanded(child: OutlinedButton(onPressed: _join, child: const Padding(padding: EdgeInsets.all(12), child: Text('Join a game', style: TextStyle(fontSize: 16))))),
+                  Expanded(child: OutlinedButton(onPressed: () => _join(), child: const Padding(padding: EdgeInsets.all(12), child: Text('Join with code', style: TextStyle(fontSize: 16))))),
                 ]),
-                const SizedBox(height: 16),
-                const Text('Build 6', textAlign: TextAlign.center, style: TextStyle(fontSize: 11, color: Colors.white54)),
+                const SizedBox(height: 12),
+                OutlinedButton(
+                  onPressed: _browse,
+                  child: const Padding(padding: EdgeInsets.all(12), child: Text('Find open games', style: TextStyle(fontSize: 16))),
+                ),
+                SwitchListTile(
+                  contentPadding: EdgeInsets.zero,
+                  title: const Text('Let others find my hosted game', style: TextStyle(fontSize: 14)),
+                  value: listPublicly,
+                  onChanged: (v) => setState(() => listPublicly = v),
+                ),
+                const SizedBox(height: 8),
+                const Text('Build 7', textAlign: TextAlign.center, style: TextStyle(fontSize: 11, color: Colors.white54)),
               ],
             ),
           ))),
@@ -570,6 +636,107 @@ class CardArt extends CustomPainter {
   bool shouldRepaint(covariant CardArt old) => old.card != card;
 }
 
+// ---------------------------------------------------------------- Find open games
+class BrowseGamesScreen extends StatefulWidget {
+  const BrowseGamesScreen({super.key});
+  @override
+  State<BrowseGamesScreen> createState() => _BrowseGamesScreenState();
+}
+
+class _BrowseGamesScreenState extends State<BrowseGamesScreen> {
+  List<Map<String, dynamic>> games = [];
+  bool loading = true, _busy = false;
+  String? error;
+  Timer? _t;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+    _t = Timer.periodic(const Duration(seconds: 5), (_) => _load());
+  }
+
+  @override
+  void dispose() {
+    _t?.cancel();
+    super.dispose();
+  }
+
+  Future<void> _load() async {
+    if (_busy) return;
+    _busy = true;
+    try {
+      final raw = keyed(await Rtdb.get('openGames'));
+      final now = DateTime.now().millisecondsSinceEpoch;
+      final out = <Map<String, dynamic>>[];
+      for (final e in raw.entries.take(20)) {
+        final v = e.value;
+        if (v is! Map) continue;
+        final t = (v['t'] as num?)?.toInt() ?? 0;
+        if (now - t > 3 * 3600 * 1000) continue; // older than 3 hours
+        final lobby = await Rtdb.get('rooms/${e.key}/lobby');
+        if (lobby is! Map || lobby['started'] == true) continue;
+        out.add({
+          'code': e.key,
+          'host': '${v['host']}',
+          'n': (lobby['n'] as num).toInt(),
+          'target': (lobby['target'] as num).toInt(),
+          'seated': keyed(lobby['seats']).length,
+        });
+      }
+      if (mounted) {
+        setState(() {
+          games = out;
+          loading = false;
+          error = null;
+        });
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          loading = false;
+          error = 'Could not load games: $e';
+        });
+      }
+    } finally {
+      _busy = false;
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) => Scaffold(
+        appBar: AppBar(title: const Text('Open games'), actions: [IconButton(icon: const Icon(Icons.refresh), onPressed: _load)]),
+        body: SafeArea(
+          child: Center(
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 520),
+              child: loading
+                  ? const Center(child: CircularProgressIndicator())
+                  : ListView(padding: const EdgeInsets.all(16), children: [
+                      if (error != null) Text(error!, style: const TextStyle(color: Colors.redAccent)),
+                      if (games.isEmpty && error == null)
+                        const Padding(
+                          padding: EdgeInsets.all(24),
+                          child: Text('No open games right now. Host one, or ask a friend for their code.', textAlign: TextAlign.center, style: TextStyle(fontSize: 16)),
+                        ),
+                      for (final g in games)
+                        Card(
+                          child: ListTile(
+                            leading: const Icon(Icons.groups),
+                            title: Text("${g['host']}'s game", style: const TextStyle(fontSize: 17)),
+                            subtitle: Text('${g['seated']}/${g['n']} players  -  to ${g['target']}'),
+                            trailing: FilledButton(onPressed: () => Navigator.pop(context, g['code'] as String), child: const Text('Join')),
+                          ),
+                        ),
+                      const SizedBox(height: 8),
+                      const Text('The list refreshes every few seconds.', textAlign: TextAlign.center, style: TextStyle(fontSize: 12)),
+                    ]),
+            ),
+          ),
+        ),
+      );
+}
+
 // ---------------------------------------------------------------- Lobby
 class LobbyScreen extends StatefulWidget {
   final String nick;
@@ -603,6 +770,7 @@ class _LobbyScreenState extends State<LobbyScreen> {
     if (!_go) {
       if (widget.isHost) {
         Rtdb.delete('rooms/${widget.code}');
+        Rtdb.delete('openGames/${widget.code}');
       } else {
         Rtdb.delete('rooms/${widget.code}/lobby/seats/$mySeat');
       }
@@ -648,10 +816,16 @@ class _LobbyScreenState extends State<LobbyScreen> {
   Future<void> _start() async {
     try {
       await Rtdb.patch('rooms/${widget.code}/lobby', {'started': true});
+      await Rtdb.delete('openGames/${widget.code}');
     } catch (_) {}
     _go = true;
     _t?.cancel();
     if (mounted) _launch(seats);
+  }
+
+  Future<void> _copyInvite() async {
+    await Clipboard.setData(ClipboardData(text: 'Join my Hanahuda game! ${inviteLink(widget.code)}  (game code: ${widget.code})'));
+    if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Invite copied. Paste it into a text or chat.')));
   }
 
   Future<void> _sit(int seat) async {
@@ -687,6 +861,11 @@ class _LobbyScreenState extends State<LobbyScreen> {
       const Text('Game code', textAlign: TextAlign.center),
       Text(widget.code, textAlign: TextAlign.center, style: const TextStyle(fontSize: 52, fontWeight: FontWeight.bold, letterSpacing: 8)),
       const Text('Friends join with this code.', textAlign: TextAlign.center),
+      if (widget.isHost)
+        Padding(
+          padding: const EdgeInsets.only(top: 8),
+          child: Center(child: OutlinedButton.icon(onPressed: _copyInvite, icon: const Icon(Icons.copy), label: const Text('Copy invite link'))),
+        ),
       const SizedBox(height: 16),
     ];
     if (n == 4) {

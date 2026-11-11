@@ -9,7 +9,12 @@ import 'dart:math';
 import 'package:http/http.dart' as http;
 import 'hanahuda_engine.dart';
 
-const String kDatabaseUrl = '';
+const String kDatabaseUrl = 'https://hanahuda-419b7-default-rtdb.firebaseio.com/';
+
+/// Address of your website (used to build invite links).
+const String kSiteUrl = 'https://anthonyobrien19-design.github.io/hanahuda/';
+
+String inviteLink(String code) => '$kSiteUrl?join=$code';
 
 class Rtdb {
   static bool get configured => kDatabaseUrl.trim().isNotEmpty;
