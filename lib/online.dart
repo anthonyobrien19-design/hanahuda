@@ -20,9 +20,9 @@ String inviteLink(String code) => '$kSiteUrl?join=$code';
 /// Optional relay (TURN) server so voice also works for players on mobile data or strict networks.
 /// Leave empty to use only the free Google STUN server. Example for a Metered account:
 ///   kTurnUrl = 'turn:global.relay.metered.ca:80', plus your username and password.
-const String kTurnUrl = '';
-const String kTurnUser = '';
-const String kTurnPass = '';
+const String kTurnUrl = 'turn:global.relay.metered.ca:80';
+const String kTurnUser = '018617eeae041b12a14f7994';
+const String kTurnPass = 'UYHKjP42T6QN5xT0';
 
 class Rtdb {
   static bool get configured => kDatabaseUrl.trim().isNotEmpty;
