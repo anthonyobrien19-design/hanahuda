@@ -183,6 +183,12 @@ class _SetupScreenState extends State<SetupScreen> {
       await _join(preCode: link);
       return;
     }
+    final solo = await SessionStore.loadSolo();
+    if (solo != null && mounted) {
+      _msg('Picking up your game where you left off...');
+      Navigator.push(context, MaterialPageRoute(builder: (_) => GameScreen(playerCount: solo.n, target: solo.target, resume: solo.cp)));
+      return;
+    }
     if (!await SessionStore.seenIntro() && mounted) {
       await SessionStore.markIntroSeen();
       if (mounted) Navigator.push(context, MaterialPageRoute(builder: (_) => const IntroScreen()));
@@ -205,8 +211,22 @@ class _SetupScreenState extends State<SetupScreen> {
         Navigator.push(context, MaterialPageRoute(builder: (_) => LobbyScreen(nick: s.nick, code: s.code, isHost: s.isHost, mySeat: s.seat, n: s.n, target: s.target)));
         return true;
       }
+      // The game is running. Did the computer take my seat while I was away?
+      if (nicks[s.seat] != s.nick) {
+        await SessionStore.clear();
+        _msg('The computer took your seat while you were away. Tap "Join with code" to hop back in.');
+        return false;
+      }
+      // Who is the host now? It may have changed while I was away.
+      var isHost = s.isHost;
+      var epoch = 0;
+      final hn = await Rtdb.get('rooms/${s.code}/host');
+      if (hn is Map) {
+        epoch = (hn['epoch'] as num?)?.toInt() ?? 0;
+        isHost = ((hn['seat'] as num?)?.toInt() ?? -1) == s.seat;
+      }
       Map<String, dynamic>? cp;
-      if (s.isHost) {
+      if (isHost) {
         final c = await Rtdb.get('rooms/${s.code}/checkpoint');
         if (c is Map) cp = Map<String, dynamic>.from(c);
         if (cp == null) {
@@ -221,8 +241,9 @@ class _SetupScreenState extends State<SetupScreen> {
           builder: (_) => GameScreen(
             playerCount: s.n,
             target: s.target,
-            online: OnlineConfig(code: s.code, isHost: s.isHost, mySeat: s.seat, seatNicks: nicks),
+            online: OnlineConfig(code: s.code, isHost: isHost, mySeat: s.seat, seatNicks: nicks),
             resume: cp,
+            hostEpoch: epoch,
           ),
         ),
       );
@@ -315,13 +336,13 @@ class _SetupScreenState extends State<SetupScreen> {
         _msg('No game found with that code.');
         return;
       }
-      if (lobby['started'] == true) {
-        _msg('That game has already started.');
-        return;
-      }
       final n = (lobby['n'] as num).toInt();
       final tgt = (lobby['target'] as num).toInt();
       final seats = keyed(lobby['seats']);
+      if (lobby['started'] == true) {
+        await _joinRunning(code, nick, n, tgt, seats);
+        return;
+      }
       var seat = -1;
       for (var i = 1; i < n; i++) {
         if (seats['$i'] == null) {
@@ -336,6 +357,58 @@ class _SetupScreenState extends State<SetupScreen> {
       await Rtdb.put('rooms/$code/lobby/seats/$seat', nick);
       if (!mounted) return;
       Navigator.push(context, MaterialPageRoute(builder: (_) => LobbyScreen(nick: nick, code: code, isHost: false, mySeat: seat, n: n, target: tgt)));
+    } catch (e) {
+      _msg('Could not join: $e');
+    }
+  }
+
+  /// Hop into a game that is already being played, taking over a seat the computer is playing.
+  Future<void> _joinRunning(String code, String nick, int n, int tgt, Map<String, dynamic> seats) async {
+    final open = [for (var i = 0; i < n; i++) if (seats['$i'] == null) i];
+    if (open.isEmpty) {
+      _msg('That game is in progress and every seat has a person in it.');
+      return;
+    }
+    String describe(int i) {
+      if (n == 4) {
+        final mate = seats['${(i + 2) % 4}']?.toString();
+        return 'Seat ${i + 1} (teammate: ${mate ?? 'computer'})';
+      }
+      return 'Seat ${i + 1}';
+    }
+
+    final seat = await showDialog<int>(
+      context: context,
+      builder: (ctx) => SimpleDialog(
+        title: const Text('Game in progress: take a seat'),
+        children: [
+          const Padding(padding: EdgeInsets.fromLTRB(24, 0, 24, 8), child: Text('You will take over from the computer.')),
+          for (final i in open) SimpleDialogOption(onPressed: () => Navigator.pop(ctx, i), child: Text(describe(i), style: const TextStyle(fontSize: 16))),
+          SimpleDialogOption(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
+        ],
+      ),
+    );
+    if (seat == null) return;
+    try {
+      await Rtdb.put('rooms/$code/lobby/seats/$seat', nick);
+      await Future.delayed(const Duration(milliseconds: 600));
+      final check = keyed(await Rtdb.get('rooms/$code/lobby/seats'));
+      if (check['$seat']?.toString() != nick) {
+        _msg('Someone else just took that seat. Try again.');
+        return;
+      }
+      final nicks = List<String?>.generate(n, (i) => i == seat ? nick : check['$i']?.toString());
+      if (!mounted) return;
+      Navigator.push(
+        context,
+        MaterialPageRoute(
+          builder: (_) => GameScreen(
+            playerCount: n,
+            target: tgt,
+            online: OnlineConfig(code: code, isHost: false, mySeat: seat, seatNicks: nicks),
+          ),
+        ),
+      );
     } catch (e) {
       _msg('Could not join: $e');
     }
@@ -408,7 +481,7 @@ class _SetupScreenState extends State<SetupScreen> {
                   TextButton(onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const IntroScreen())), child: const Text('How to play')),
                   TextButton(onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const RulesScreen())), child: const Text('Rules & scores')),
                 ]),
-                const Text('Build 8', textAlign: TextAlign.center, style: TextStyle(fontSize: 11, color: Colors.white54)),
+                const Text('Build 9', textAlign: TextAlign.center, style: TextStyle(fontSize: 11, color: Colors.white54)),
               ],
             ),
           ))),
@@ -1179,8 +1252,9 @@ class GameScreen extends StatefulWidget {
   final int playerCount;
   final int target;
   final OnlineConfig? online;
-  final Map<String, dynamic>? resume; // host only: restores a game after a reload
-  const GameScreen({super.key, required this.playerCount, required this.target, this.online, this.resume});
+  final Map<String, dynamic>? resume; // restores a game after a reload (host, new host, or solo)
+  final int hostEpoch; // online: how many times the host has changed
+  const GameScreen({super.key, required this.playerCount, required this.target, this.online, this.resume, this.hostEpoch = 0});
   @override
   State<GameScreen> createState() => _GameScreenState();
 }
@@ -1213,6 +1287,25 @@ class _GameScreenState extends State<GameScreen> with WidgetsBindingObserver {
   HCard? _peekCard; // bottom card of the stack, seen only by the first player and partner
   Set<int> _peekSeats = {};
 
+  // ---- seat bookkeeping ----
+  // Inside this screen, index 0 is always "me". Index i is the player i places clockwise from me,
+  // which is seat (mySeat + i) % n at the table. Everything stored online uses real seat numbers.
+  int get _off => widget.online?.mySeat ?? 0;
+  int _abs(int i) => (i + _off) % widget.playerCount;
+  int _idx(int seat) => (seat - _off + widget.playerCount) % widget.playerCount;
+  int _absTeam(int t) => widget.playerCount == 4 ? (t + _off) % 2 : _abs(t);
+  int _intTeam(int a) => widget.playerCount == 4 ? (a - _off) % 2 : _idx(a);
+
+  late List<String?> _seatNicks; // by real seat number; null = computer
+  Map<int, Map<String, Object?>> _awaitAsk = {}; // host: question waiting on a remote player (by seat)
+  int _askN = DateTime.now().millisecondsSinceEpoch, _epoch = 0;
+  int _askShown = -1, _answeredAsk = -1, _curAskN = -1;
+  Timer? _hostTimer, _watchTimer;
+  bool _deposed = false, _handedOff = false, _claiming = false, _matchOver = false;
+  int _lastHb = -1, _watchEpoch = -1;
+  DateTime _hbChanged = DateTime.now();
+  static const _kDropped = -999;
+
   @override
   void initState() {
     super.initState();
@@ -1221,8 +1314,10 @@ class _GameScreenState extends State<GameScreen> with WidgetsBindingObserver {
     final o = widget.online;
     String nameFor(int i) {
       if (o != null) {
-        final nick = i < o.seatNicks.length ? o.seatNicks[i] : null;
-        return (nick != null && nick.isNotEmpty) ? nick : 'CPU $i';
+        final a = (o.mySeat + i) % n;
+        final nick = a < o.seatNicks.length ? o.seatNicks[a] : null;
+        if (nick != null && nick.isNotEmpty) return nick;
+        return i == 0 ? 'You' : 'CPU $a';
       }
       return i == 0 ? 'You' : (n == 4 && i == 2 ? 'Partner' : 'CPU $i');
     }
@@ -1233,17 +1328,30 @@ class _GameScreenState extends State<GameScreen> with WidgetsBindingObserver {
     for (final t in game.teamPiles.keys) {
       totals[t] = 0;
     }
+    _seatNicks = o != null ? List<String?>.of(o.seatNicks) : <String?>[];
     if (o != null) {
       for (var i = 1; i < n; i++) {
-        if (i < o.seatNicks.length && o.seatNicks[i] != null) _remote.add(i);
+        final a = (o.mySeat + i) % n;
+        if (a < o.seatNicks.length && o.seatNicks[a] != null) _remote.add(i);
+      }
+      _epoch = widget.hostEpoch;
+      _noticeId = DateTime.now().millisecondsSinceEpoch ~/ 1000; // always ahead of any earlier host's ids
+      final me = o.mySeat < o.seatNicks.length ? o.seatNicks[o.mySeat] : null;
+      if (me != null && me.isNotEmpty) {
+        SessionStore.save(SavedSession(code: o.code, nick: me, isHost: o.isHost, seat: o.mySeat, n: n, target: widget.target, inGame: true));
       }
     }
     AudioManager.instance.startMusic();
     if (o != null) _reactTimer = Timer.periodic(const Duration(milliseconds: 1500), (_) => _pollReactions());
     if (o != null && !o.isHost) {
       _clientTimer = Timer.periodic(const Duration(milliseconds: 900), (_) => _pollClient());
+      _watchTimer = Timer.periodic(const Duration(seconds: 4), (_) => _clientWatch());
       WidgetsBinding.instance.addPostFrameCallback((_) => _pollClient());
     } else {
+      if (o != null) {
+        Rtdb.put('rooms/${o.code}/host', {'seat': o.mySeat, 'hb': DateTime.now().millisecondsSinceEpoch, 'epoch': _epoch}).catchError((_) {});
+        _hostTimer = Timer.periodic(const Duration(seconds: 3), (_) => _hostTick());
+      }
       WidgetsBinding.instance.addPostFrameCallback((_) => _playMatch());
     }
   }
@@ -1256,11 +1364,22 @@ class _GameScreenState extends State<GameScreen> with WidgetsBindingObserver {
     _clientTimer?.cancel();
     _reactTimer?.cancel();
     _bubbleTimer?.cancel();
+    _hostTimer?.cancel();
+    _watchTimer?.cancel();
     final o = widget.online;
-    if (o != null) {
+    if (o == null) {
+      SessionStore.clearSolo();
+    } else if (!_handedOff) {
       SessionStore.clear();
-      if (o.isHost) {
-        // Tell players the game is over, then clean up after they have had time to see the results.
+      if (!o.isHost) {
+        // The computer takes over my seat; I can hop back in with the game code.
+        Rtdb.delete('rooms/${o.code}/lobby/seats/${o.mySeat}').catchError((_) {});
+      } else if (_remote.isNotEmpty && !_matchOver) {
+        // Other people are still playing: free the host seat so the next player takes over.
+        Rtdb.put('rooms/${o.code}/host', {'seat': -1, 'prev': o.mySeat, 'hb': 0, 'epoch': _epoch}).catchError((_) {});
+        Rtdb.delete('rooms/${o.code}/lobby/seats/${o.mySeat}').catchError((_) {});
+      } else {
+        // Nobody else is here (or the match finished): tell everyone, then clean up after they have seen the results.
         Rtdb.patch('rooms/${o.code}/state', {'closed': true}).catchError((_) {});
         Future.delayed(const Duration(seconds: 60), () {
           Rtdb.delete('rooms/${o.code}').catchError((_) {});
@@ -1277,7 +1396,11 @@ class _GameScreenState extends State<GameScreen> with WidgetsBindingObserver {
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed && widget.online != null) {
       _polling = false;
-      if (!widget.online!.isHost) _pollClient();
+      if (!widget.online!.isHost) {
+        _pollClient();
+      } else {
+        _hostTick();
+      }
       _pollReactions();
     }
   }
@@ -1310,7 +1433,7 @@ class _GameScreenState extends State<GameScreen> with WidgetsBindingObserver {
   // ---- Host: publish the game so other players can see it ----
   Future<void> _publish() async {
     final o = widget.online;
-    if (o == null || !o.isHost) return;
+    if (o == null || !o.isHost || _deposed) return;
     if (_publishing) {
       _dirty = true;
       return;
@@ -1320,29 +1443,32 @@ class _GameScreenState extends State<GameScreen> with WidgetsBindingObserver {
       do {
         _dirty = false;
         _ver++;
+        final n = widget.playerCount;
         final msg = message.startsWith('Your turn') ? "${game.players[0].name}'s turn" : message;
         final state = <String, Object?>{
           'v': _ver,
-          'names': [for (final p in game.players) p.name],
-          'teams': [for (final p in game.players) p.team],
-          'counts': [for (final p in game.players) p.hand.length],
+          'names': [for (var a = 0; a < n; a++) game.players[_idx(a)].name],
+          'teams': [for (var a = 0; a < n; a++) _absTeam(game.players[_idx(a)].team)],
+          'counts': [for (var a = 0; a < n; a++) game.players[_idx(a)].hand.length],
           'table': [for (final c in game.table) c.id],
           'stack': game.stack.length,
-          'piles': {for (final e in game.teamPiles.entries) '${e.key}': [for (final c in e.value) c.id]},
-          'current': game.current,
-          'dealer': game.dealer,
+          'piles': {for (final e in game.teamPiles.entries) '${_absTeam(e.key)}': [for (final c in e.value) c.id]},
+          'current': _abs(game.current),
+          'dealer': _abs(game.dealer),
           'message': msg,
           'flipped': flipped?.id ?? -1,
-          'totals': {for (final e in totals.entries) '${e.key}': e.value},
+          'totals': {for (final e in totals.entries) '${_absTeam(e.key)}': e.value},
           'notices': _noticeList,
           'peek': (_peekCard != null && game.stack.isNotEmpty && game.stack.first == _peekCard) ? _peekCard!.id : -1,
-          'peekSeats': _peekSeats.toList(),
+          'peekSeats': [for (final i in _peekSeats) _abs(i)],
         };
         await Rtdb.put('rooms/${o.code}/state', state);
-        for (final seat in _remote) {
+        for (final idx in _remote.toList()) {
+          final seat = _abs(idx);
           await Rtdb.put('rooms/${o.code}/hands/$seat', {
-            'hand': [for (final c in game.players[seat].hand) c.id],
+            'hand': [for (final c in game.players[idx].hand) c.id],
             'legal': _awaitLegal[seat] ?? <int>[],
+            if (_awaitAsk[seat] != null) 'ask': _awaitAsk[seat],
           });
         }
       } while (_dirty);
@@ -1352,11 +1478,91 @@ class _GameScreenState extends State<GameScreen> with WidgetsBindingObserver {
     }
   }
 
-  // ---- Host: wait for another person's move ----
-  Future<int> _waitRemoteAction(int seat, List<int> legalIds) async {
+  // ---- Host: look after the room (heartbeat, who joined, who left) ----
+  Future<void> _hostTick() async {
+    final o = widget.online;
+    if (o == null || !o.isHost || _deposed || !mounted) return;
+    try {
+      final h = await Rtdb.get('rooms/${o.code}/host');
+      if (h is Map && ((h['epoch'] as num?)?.toInt() ?? 0) > _epoch) {
+        _depose();
+        return;
+      }
+      await Rtdb.patch('rooms/${o.code}/host', {'hb': DateTime.now().millisecondsSinceEpoch});
+      final seats = keyed(await Rtdb.get('rooms/${o.code}/lobby/seats'));
+      if (mounted && seats['${o.mySeat}'] != null) _syncSeats(seats);
+    } catch (_) {}
+  }
+
+  /// Another player took over as host while I was away.
+  void _depose() {
+    if (_deposed) return;
+    _deposed = true;
+    _handedOff = true; // do not close the game I no longer run
+    _hostTimer?.cancel();
+    SessionStore.clear();
+    if (!mounted) return;
+    _dialog<void>(
+      'Another player is hosting now',
+      'You were away for a bit, so another player took over as host and the computer is playing your seat. Tap "Join with code" to hop back in.',
+      (ctx) => [TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('OK'))],
+    ).then((_) {
+      if (mounted) Navigator.pop(context);
+    });
+  }
+
+  void _syncSeats(Map<String, dynamic> seats) {
     final o = widget.online!;
+    for (var a = 0; a < widget.playerCount; a++) {
+      if (a == o.mySeat) continue;
+      final idx = _idx(a);
+      final nick = seats['$a']?.toString();
+      if (nick != null && nick.isNotEmpty && !_remote.contains(idx)) {
+        _addRemote(idx, nick);
+      } else if (nick == null && _remote.contains(idx)) {
+        _dropRemote(idx);
+      }
+    }
+  }
+
+  Future<void> _addRemote(int idx, String nick) async {
+    final o = widget.online!;
+    final a = _abs(idx);
+    try {
+      await Rtdb.delete('rooms/${o.code}/hands/$a'); // clear anything a previous player left behind
+    } catch (_) {}
+    if (!mounted) return;
+    setState(() {
+      _remote.add(idx);
+      game.players[idx].name = nick;
+    });
+    _seatNicks[a] = nick;
+    _showBubble('$nick joined the game');
+    _publish();
+  }
+
+  void _dropRemote(int idx) {
+    final o = widget.online!;
+    if (!_remote.remove(idx)) return;
+    final a = _abs(idx);
+    final old = game.players[idx].name;
+    _awaitLegal.remove(a);
+    _awaitAsk.remove(a);
+    if (mounted) setState(() => game.players[idx].name = 'CPU $a');
+    _seatNicks[a] = null;
+    Rtdb.delete('rooms/${o.code}/hands/$a').catchError((_) {});
+    Rtdb.delete('rooms/${o.code}/lobby/seats/$a').catchError((_) {});
+    if (mounted) _showBubble('$old left. The computer plays their seat.');
+    _publish();
+  }
+
+  // ---- Host: wait for another person's move ----
+  Future<int> _waitRemoteAction(int idx, List<int> legalIds) async {
+    final o = widget.online!;
+    final seat = _abs(idx);
     final clock = Stopwatch()..start();
-    while (mounted) {
+    while (mounted && !_deposed) {
+      if (!_remote.contains(idx)) return _kDropped; // they left: the computer takes over
       try {
         final a = await Rtdb.get('rooms/${o.code}/actions/$seat');
         if (a is Map) {
@@ -1368,31 +1574,144 @@ class _GameScreenState extends State<GameScreen> with WidgetsBindingObserver {
           }
         }
       } catch (_) {}
-      if (clock.elapsed.inSeconds > 120) return legalIds.first; // player went away
+      if (clock.elapsed.inSeconds > 180) {
+        _dropRemote(idx); // went away: the computer takes over
+        return _kDropped;
+      }
       await Future.delayed(const Duration(milliseconds: 700));
     }
-    return legalIds.first;
+    return _kDropped;
   }
 
-  Future<RoundResult?> _remoteTurn(int seat) async {
-    final p = game.players[seat];
+  /// Ask another person a question and wait for their answer (kinds: cap, give, early).
+  Future<int> _askRemote(int idx, String kind, List<int> ids, String msg) async {
+    final seat = _abs(idx);
+    _awaitAsk = {seat: {'kind': kind, 'ids': ids, 'msg': msg, 'n': ++_askN}};
+    _awaitLegal = {};
+    if (mounted) {
+      setState(() => message = kind == 'cap' ? '${game.players[idx].name} is choosing a card to take' : (kind == 'give' ? '${game.players[idx].name} has chitsiobiki and is deciding' : '${game.players[idx].name} may end the round'));
+    }
+    await _publish();
+    final id = await _waitRemoteAction(idx, ids);
+    _awaitAsk = {};
+    return id;
+  }
+
+  Future<HCard> _remoteCapture(int idx, List<HCard> opts, HCard played, String msg) async {
+    final id = await _askRemote(idx, 'cap', [for (final c in opts) c.id], msg);
+    if (id == _kDropped) return ai.chooseDrawCapture(game, played) ?? opts.first;
+    return opts.firstWhere((c) => c.id == id, orElse: () => opts.first);
+  }
+
+  Future<RoundResult?> _remoteTurn(int idx) async {
+    final seat = _abs(idx);
+    final p = game.players[idx];
     final legalCards = game.legalPlays(p);
     final ids = [for (final c in legalCards) c.id];
     _awaitLegal = {seat: ids};
     setState(() => message = "${p.name}'s turn");
     await _publish();
-    final id = await _waitRemoteAction(seat, ids);
+    final id = await _waitRemoteAction(idx, ids);
     _awaitLegal = {};
-    if (!mounted) return null;
+    if (!mounted || _deposed) return null;
+    if (id == _kDropped) return _aiTurn();
     final card = legalCards.firstWhere((c) => c.id == id, orElse: () => legalCards.first);
     final opts = game.captureOptions(card);
+    HCard? cap;
+    if (opts.length == 1) {
+      cap = opts.first;
+    } else if (opts.length > 1) {
+      cap = await _remoteCapture(idx, opts, card, 'Tap the table card to capture');
+      if (!mounted || _deposed) return null;
+    }
     setState(() {
       message = '${p.name} plays ${setNames[card.set]}#${card.index}';
-      game.playFromHand(card, capture: opts.isEmpty ? null : (opts.length == 1 ? opts.first : (ai.chooseDrawCapture(game, card) ?? opts.first)));
+      game.playFromHand(card, capture: cap);
     });
     AudioManager.instance.sfx(opts.isNotEmpty ? 'capture' : 'deal');
     await _delay(500);
-    return _flipPhase(human: false);
+    return _flipPhase(human: false, remote: _remote.contains(idx) ? idx : null);
+  }
+
+  // ---- Client: watch the host. If the host disappears, the next player takes over. ----
+  Future<void> _clientWatch() async {
+    final o = widget.online;
+    if (o == null || o.isHost || _claiming || !mounted || _closedShown) return;
+    try {
+      final h = await Rtdb.get('rooms/${o.code}/host');
+      if (h is! Map) return;
+      final ep = (h['epoch'] as num?)?.toInt() ?? 0;
+      final seat = (h['seat'] as num?)?.toInt() ?? -1;
+      final hb = (h['hb'] as num?)?.toInt() ?? 0;
+      final now = DateTime.now();
+      if (ep != _watchEpoch || hb != _lastHb) {
+        _watchEpoch = ep;
+        _lastHb = hb;
+        _hbChanged = now;
+      }
+      final vacant = seat < 0;
+      if (!vacant && now.difference(_hbChanged).inSeconds < 15) return;
+      _claiming = true;
+      if (!vacant) {
+        // Looks like the host went quiet. Look again after a pause so a sleeping phone does not cause a false alarm.
+        await Future.delayed(const Duration(seconds: 5));
+        final h2 = await Rtdb.get('rooms/${o.code}/host');
+        if (h2 is! Map || ((h2['hb'] as num?)?.toInt() ?? 0) != hb || ((h2['epoch'] as num?)?.toInt() ?? 0) != ep) {
+          _hbChanged = DateTime.now();
+          _claiming = false;
+          return;
+        }
+      }
+      final from = seat >= 0 ? seat : ((h['prev'] as num?)?.toInt() ?? 0);
+      await _claimHost(ep, from);
+    } catch (_) {
+    } finally {
+      if (!_handedOff) {
+        _claiming = false;
+        _hbChanged = DateTime.now();
+      }
+    }
+  }
+
+  /// The next player (clockwise from the old host) becomes the host. Others wait their turn in line.
+  Future<void> _claimHost(int epoch, int from) async {
+    final o = widget.online!;
+    final n = widget.playerCount;
+    final seats = keyed(await Rtdb.get('rooms/${o.code}/lobby/seats'));
+    final order = <int>[];
+    for (var k = 1; k <= n; k++) {
+      final s = (from + k) % n;
+      if (s != from && seats['$s'] != null) order.add(s);
+    }
+    final rank = order.indexOf(o.mySeat);
+    if (rank < 0) return;
+    if (rank > 0) await Future.delayed(Duration(seconds: rank * 5));
+    final h = await Rtdb.get('rooms/${o.code}/host');
+    if (h is Map && ((h['epoch'] as num?)?.toInt() ?? 0) != epoch) return; // someone else already took over
+    final ne = epoch + 1;
+    await Rtdb.put('rooms/${o.code}/host', {'seat': o.mySeat, 'hb': DateTime.now().millisecondsSinceEpoch, 'epoch': ne});
+    await Future.delayed(const Duration(seconds: 2));
+    final c = await Rtdb.get('rooms/${o.code}/host');
+    if (c is! Map || ((c['seat'] as num?)?.toInt() ?? -1) != o.mySeat || ((c['epoch'] as num?)?.toInt() ?? 0) != ne) return; // lost the race
+    final cp = await Rtdb.get('rooms/${o.code}/checkpoint');
+    if (cp is! Map) return;
+    await Rtdb.delete('rooms/${o.code}/lobby/seats/$from'); // the old host's seat goes to the computer
+    final seats2 = keyed(await Rtdb.get('rooms/${o.code}/lobby/seats'));
+    final nicks = List<String?>.generate(n, (i) => seats2['$i']?.toString());
+    if (!mounted) return;
+    _handedOff = true;
+    _clientTimer?.cancel();
+    _watchTimer?.cancel();
+    final nav = Navigator.of(context);
+    nav.pushReplacement(MaterialPageRoute(
+      builder: (_) => GameScreen(
+        playerCount: n,
+        target: widget.target,
+        online: OnlineConfig(code: o.code, isHost: true, mySeat: o.mySeat, seatNicks: nicks),
+        resume: Map<String, dynamic>.from(cp),
+        hostEpoch: ne,
+      ),
+    ));
   }
 
   // ---- Client: read the host's game and show it from my seat ----
@@ -1469,7 +1788,14 @@ class _GameScreenState extends State<GameScreen> with WidgetsBindingObserver {
     });
     final lg = h is Map ? asIds(h['legal']) : <int>[];
     final fl = (s['flipped'] as num?)?.toInt() ?? -1;
-    final nowMine = lg.isNotEmpty;
+    Map<String, dynamic>? ask = (h is Map && h['ask'] is Map) ? Map<String, dynamic>.from(h['ask'] as Map) : null;
+    final askN = (ask?['n'] as num?)?.toInt() ?? -1;
+    if (ask != null && askN == _answeredAsk) ask = null; // already answered, host has not moved on yet
+    final askKind = ask?['kind']?.toString();
+    final askIds = asIds(ask?['ids']);
+    final askMsg = '${ask?['msg'] ?? ''}';
+    _curAskN = askN;
+    final nowMine = lg.isNotEmpty || ask != null;
     if (nowMine && !_wasMyTurn) AudioManager.instance.sfx('turn');
     _wasMyTurn = nowMine;
     setState(() {
@@ -1478,11 +1804,16 @@ class _GameScreenState extends State<GameScreen> with WidgetsBindingObserver {
         ..clear()
         ..addAll(tot);
       legal = {for (final id in lg) cardFromId(id)};
+      targets = askKind == 'cap' ? {for (final id in askIds) cardFromId(id)} : <HCard>{};
       flipped = fl >= 0 ? cardFromId(fl) : null;
-      message = lg.isNotEmpty ? 'Your turn: play a card' : '${s['message'] ?? ''}';
+      message = ask != null ? askMsg : (lg.isNotEmpty ? 'Your turn: play a card' : '${s['message'] ?? ''}');
       final pid = (s['peek'] as num?)?.toInt() ?? -1;
       _peekCard = (pid >= 0 && asIds(s['peekSeats']).contains(my)) ? cardFromId(pid) : null;
     });
+    if (ask != null && (askKind == 'give' || askKind == 'early') && askN != _askShown) {
+      _askShown = askN;
+      _clientAsk(askKind!, askIds, askMsg, askN);
+    }
     final nl = [for (final x in asList(s['notices'])) if (x is Map) Map<String, dynamic>.from(x)];
     nl.sort((a, b) => (a['id'] as num).compareTo(b['id'] as num));
     if (nl.isNotEmpty) {
@@ -1498,6 +1829,36 @@ class _GameScreenState extends State<GameScreen> with WidgetsBindingObserver {
         }
       }
     }
+  }
+
+  void _sendAction(int id) {
+    final o = widget.online;
+    if (o == null) return;
+    _actionN = max(_actionN + 1, DateTime.now().millisecondsSinceEpoch);
+    Rtdb.put('rooms/${o.code}/actions/${o.mySeat}', {'n': _actionN, 'id': id}).catchError((_) {});
+  }
+
+  /// A question from the host that needs a pop-up: chitsiobiki trade, or ending the round early.
+  Future<void> _clientAsk(String kind, List<int> ids, String msg, int askN) async {
+    int? pick;
+    if (kind == 'give') {
+      pick = await _dialog<int>('Chitsiobiki!', msg, (ctx) => [
+            for (final id in ids.where((x) => x >= 0))
+              TextButton(
+                onPressed: () => Navigator.pop(ctx, id),
+                child: Text('Trade ${setNames[cardFromId(id).set]}#${cardFromId(id).index} (${_typeLabel(cardFromId(id).type)})'),
+              ),
+            TextButton(onPressed: () => Navigator.pop(ctx, -1), child: const Text('Keep')),
+          ]);
+    } else {
+      pick = await _dialog<int>('Call it?', msg, (ctx) => [
+            TextButton(onPressed: () => Navigator.pop(ctx, 0), child: const Text('Keep playing')),
+            FilledButton(onPressed: () => Navigator.pop(ctx, 1), child: const Text('End round')),
+          ]);
+    }
+    if (!mounted || pick == null) return;
+    _answeredAsk = askN;
+    _sendAction(pick);
   }
 
   /// Shows every result the host sent, in order, even if several arrived between checks.
@@ -1523,7 +1884,7 @@ class _GameScreenState extends State<GameScreen> with WidgetsBindingObserver {
   String _seatName(int seat) {
     final o = widget.online!;
     final n = widget.playerCount;
-    final idx = o.isHost ? seat : (seat - o.mySeat + n) % n;
+    final idx = (seat - o.mySeat + n) % n;
     return (idx >= 0 && idx < game.players.length) ? game.players[idx].name : 'Player';
   }
 
@@ -1619,7 +1980,7 @@ class _GameScreenState extends State<GameScreen> with WidgetsBindingObserver {
   int _seatOfIndex(int i) {
     final o = widget.online;
     if (o == null) return i;
-    return o.isHost ? i : (o.mySeat + i) % widget.playerCount;
+    return (o.mySeat + i) % widget.playerCount;
   }
 
   void _openVoice() {
@@ -1631,7 +1992,7 @@ class _GameScreenState extends State<GameScreen> with WidgetsBindingObserver {
         valueListenable: _voiceTick,
         builder: (c, _, __) {
           final v = _voice;
-          final humans = [for (var s = 0; s < widget.playerCount; s++) if (s < o.seatNicks.length && o.seatNicks[s] != null) s];
+          final humans = <int>{o.mySeat, ...?v?.members}.toList()..sort();
           return SafeArea(
             child: Padding(
               padding: const EdgeInsets.all(16),
@@ -1671,22 +2032,28 @@ class _GameScreenState extends State<GameScreen> with WidgetsBindingObserver {
     );
   }
 
-  // ---- Host: save the game so it can be restored after a reload ----
+  // ---- Save the game (online host, or solo) so it can be restored after a reload or a host change ----
+  // Saved with real seat and team numbers, so any player can pick the game up as the new host.
   void _checkpoint() {
     final o = widget.online;
-    if (o == null || !o.isHost) return;
+    if (o != null && !o.isHost) return;
+    final n = widget.playerCount;
     final cp = <String, Object?>{
-      'hands': {for (var i = 0; i < game.players.length; i++) '$i': [for (final c in game.players[i].hand) c.id]},
+      'hands': {for (var a = 0; a < n; a++) '$a': [for (final c in game.players[_idx(a)].hand) c.id]},
       'stack': [for (final c in game.stack) c.id],
       'table': [for (final c in game.table) c.id],
-      'piles': {for (final e in game.teamPiles.entries) '${e.key}': [for (final c in e.value) c.id]},
-      'current': game.current,
-      'dealer': game.dealer,
-      'totals': {for (final e in totals.entries) '${e.key}': e.value},
-      'peekSeats': _peekSeats.toList(),
+      'piles': {for (final e in game.teamPiles.entries) '${_absTeam(e.key)}': [for (final c in e.value) c.id]},
+      'current': _abs(game.current),
+      'dealer': _abs(game.dealer),
+      'totals': {for (final e in totals.entries) '${_absTeam(e.key)}': e.value},
+      'peekSeats': [for (final i in _peekSeats) _abs(i)],
       'peek': _peekCard?.id ?? -1,
     };
-    Rtdb.put('rooms/${o.code}/checkpoint', cp).catchError((_) {});
+    if (o == null) {
+      SessionStore.saveSolo(n, widget.target, cp);
+    } else {
+      Rtdb.put('rooms/${o.code}/checkpoint', cp).catchError((_) {});
+    }
   }
 
   void _restore(Map<String, dynamic> cp) {
@@ -1694,7 +2061,7 @@ class _GameScreenState extends State<GameScreen> with WidgetsBindingObserver {
     for (var i = 0; i < game.players.length; i++) {
       game.players[i].hand
         ..clear()
-        ..addAll(asIds(hands['$i']).map(cardFromId));
+        ..addAll(asIds(hands['${_abs(i)}']).map(cardFromId));
     }
     game.stack
       ..clear()
@@ -1706,16 +2073,18 @@ class _GameScreenState extends State<GameScreen> with WidgetsBindingObserver {
       game.teamPiles[t]!.clear();
     }
     keyed(cp['piles']).forEach((k, v) {
-      final t = int.tryParse(k);
-      if (t != null && game.teamPiles[t] != null) game.teamPiles[t]!.addAll(asIds(v).map(cardFromId));
+      final a = int.tryParse(k);
+      if (a == null) return;
+      final t = _intTeam(a);
+      if (game.teamPiles[t] != null) game.teamPiles[t]!.addAll(asIds(v).map(cardFromId));
     });
-    game.current = (cp['current'] as num).toInt();
-    game.dealer = (cp['dealer'] as num).toInt();
+    game.current = _idx((cp['current'] as num).toInt());
+    game.dealer = _idx((cp['dealer'] as num).toInt());
     keyed(cp['totals']).forEach((k, v) {
-      final t = int.tryParse(k);
-      if (t != null) totals[t] = (v as num).toInt();
+      final a = int.tryParse(k);
+      if (a != null) totals[_intTeam(a)] = (v as num).toInt();
     });
-    _peekSeats = asIds(cp['peekSeats']).toSet();
+    _peekSeats = asIds(cp['peekSeats']).map(_idx).toSet();
     final pk = (cp['peek'] as num?)?.toInt() ?? -1;
     _peekCard = pk >= 0 ? cardFromId(pk) : null;
   }
@@ -1751,6 +2120,8 @@ class _GameScreenState extends State<GameScreen> with WidgetsBindingObserver {
       if (!mounted) return;
       final best = totals.values.reduce(max);
       if (best >= widget.target) {
+        _matchOver = true;
+        if (widget.online == null) SessionStore.clearSolo();
         final winners = totals.entries.where((e) => e.value == best).map((e) => _tn(e.key)).join(' & ');
         _setNotice('Match over', '$winners reached ${widget.target}!\n\n${_totalsText()}', end: true);
         await _dialog<void>('Match over', '$winners reached ${widget.target}!\n\n${_totalsText()}',
@@ -1827,10 +2198,12 @@ class _GameScreenState extends State<GameScreen> with WidgetsBindingObserver {
     for (var i = 0; i < game.players.length; i++) {
       final p = game.players[i];
       final sets = game.chitsiobikiSets(p);
-      if (sets.isEmpty || !mounted) continue;
+      if (sets.isEmpty || !mounted || _deposed) continue;
+      final cards = p.hand.where((c) => c.set == sets.first).toList();
+      HCard? give;
+      var announce = false;
       if (i == 0) {
-        final cards = p.hand.where((c) => c.set == sets.first).toList();
-        final give = await showDialog<HCard?>(
+        give = await showDialog<HCard?>(
           context: context,
           barrierDismissible: false,
           builder: (ctx) => AlertDialog(
@@ -1843,16 +2216,29 @@ class _GameScreenState extends State<GameScreen> with WidgetsBindingObserver {
             ],
           ),
         );
-        if (give != null) setState(() => game.tradeChitsiobiki(p, give));
       } else {
-        final give = ai.chitsiobikiGive(game, p);
-        if (give != null) {
-          setState(() {
-            game.tradeChitsiobiki(p, give);
-            message = '${p.name}: ngak a chitsiobiki!';
-          });
-          await _delay(900);
+        var decided = false;
+        if (_remote.contains(i)) {
+          final id = await _askRemote(i, 'give', [-1, for (final c in cards) c.id], 'You have three ${setNames[sets.first]} cards. Trade one for a new card?');
+          if (!mounted || _deposed) return;
+          if (id != _kDropped) {
+            decided = true;
+            give = id >= 0 ? cards.firstWhere((c) => c.id == id, orElse: () => cards.first) : null;
+            announce = give != null;
+          }
         }
+        if (!decided) {
+          give = ai.chitsiobikiGive(game, p);
+          announce = give != null;
+        }
+      }
+      final g = give;
+      if (g != null) {
+        setState(() {
+          game.tradeChitsiobiki(p, g);
+          if (announce) message = '${p.name}: ngak a chitsiobiki!';
+        });
+        if (announce) await _delay(900);
       }
     }
   }
@@ -1901,7 +2287,7 @@ class _GameScreenState extends State<GameScreen> with WidgetsBindingObserver {
     return _flipPhase(human: false);
   }
 
-  Future<RoundResult?> _flipPhase({required bool human}) async {
+  Future<RoundResult?> _flipPhase({required bool human, int? remote}) async {
     final drawn = game.omkais();
     if (drawn != null) {
       setState(() {
@@ -1924,6 +2310,9 @@ class _GameScreenState extends State<GameScreen> with WidgetsBindingObserver {
           cap = await _tablePick!.future;
           if (!mounted) return null;
           setState(() => targets = {});
+        } else if (remote != null) {
+          cap = await _remoteCapture(remote, opts, drawn, 'Omkais: tap the card to capture');
+          if (!mounted || _deposed) return null;
         } else {
           cap = ai.chooseDrawCapture(game, drawn);
         }
@@ -1949,6 +2338,14 @@ class _GameScreenState extends State<GameScreen> with WidgetsBindingObserver {
         );
         if (end == true) return game.endRoundEarly(team);
       }
+    } else if (remote != null) {
+      if (game.canCallEarlyEnd(team)) {
+        final yaks = scoreYaks(game.teamPiles[team]!);
+        final name = yaks.containsKey('arasi') ? 'arasi' : 'nanatang';
+        final id = await _askRemote(remote, 'early', [0, 1], 'You have $name! End the round now? Only $name (${yaks[name]}) would score.');
+        if (!mounted || _deposed) return null;
+        if (id == 1 || (id == _kDropped && ai.shouldCallEarlyEnd(game))) return game.endRoundEarly(team);
+      }
     } else if (ai.shouldCallEarlyEnd(game)) {
       return game.endRoundEarly(team);
     }
@@ -1961,7 +2358,7 @@ class _GameScreenState extends State<GameScreen> with WidgetsBindingObserver {
     if (o != null && !o.isHost) {
       if (legal.contains(c)) {
         setState(() => legal = {});
-        Rtdb.put('rooms/${o.code}/actions/${o.mySeat}', {'n': ++_actionN, 'id': c.id}).catchError((_) {});
+        _sendAction(c.id);
       }
       return;
     }
@@ -1970,6 +2367,15 @@ class _GameScreenState extends State<GameScreen> with WidgetsBindingObserver {
   }
 
   void _onTableTap(HCard c) {
+    final o = widget.online;
+    if (o != null && !o.isHost) {
+      if (targets.contains(c)) {
+        setState(() => targets = {});
+        _answeredAsk = _curAskN;
+        _sendAction(c.id);
+      }
+      return;
+    }
     final p = _tablePick;
     if (p != null && !p.isCompleted && targets.contains(c)) p.complete(c);
   }
@@ -2239,7 +2645,11 @@ class _GameScreenState extends State<GameScreen> with WidgetsBindingObserver {
           context: context,
           builder: (ctx) => AlertDialog(
             title: const Text('Leave this game?'),
-            content: Text(widget.online!.isHost ? 'You are the host, so leaving ends the game for everyone.' : 'You can rejoin from the start screen while the game is still running.'),
+            content: Text(widget.online!.isHost
+                ? (_remote.isNotEmpty
+                    ? 'You are the host. If you leave, the next player becomes host and the computer plays your seat.'
+                    : 'You are the only person in this game, so leaving ends it.')
+                : 'The computer will play your seat. You can hop back in later with the game code.'),
             actions: [
               TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Stay')),
               FilledButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Leave')),

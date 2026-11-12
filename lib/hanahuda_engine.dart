@@ -40,7 +40,7 @@ List<HCard> fullDeck() =>
     [for (var s = 0; s < 12; s++) for (var i = 0; i < 4; i++) HCard(s, i)];
 
 class Player {
-  final String name;
+  String name;
   final int team; // 2 players: own team each. 4 players: seats 0&2 = team 0, 1&3 = team 1
   final List<HCard> hand = [];
   Player(this.name, this.team);

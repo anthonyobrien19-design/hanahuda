@@ -45,8 +45,16 @@ class SavedSession {
   }
 }
 
+/// A single-player game saved on this device so a reload can pick it back up.
+class SoloSave {
+  final int n, target;
+  final Map<String, dynamic> cp;
+  const SoloSave(this.n, this.target, this.cp);
+}
+
 class SessionStore {
   static const _key = 'hanahuda_session';
+  static const _soloKey = 'hanahuda_solo';
   static const _introKey = 'hanahuda_intro_seen';
 
   static Future<SavedSession?> load() async {
@@ -86,6 +94,33 @@ class SessionStore {
     try {
       final p = await SharedPreferences.getInstance();
       await p.setBool(_introKey, true);
+    } catch (_) {}
+  }
+
+  static Future<void> saveSolo(int n, int target, Map<String, Object?> cp) async {
+    try {
+      final p = await SharedPreferences.getInstance();
+      await p.setString(_soloKey, jsonEncode({'n': n, 'target': target, 'cp': cp}));
+    } catch (_) {}
+  }
+
+  static Future<SoloSave?> loadSolo() async {
+    try {
+      final p = await SharedPreferences.getInstance();
+      final s = p.getString(_soloKey);
+      if (s == null) return null;
+      final j = jsonDecode(s);
+      if (j is! Map || j['cp'] is! Map) return null;
+      return SoloSave((j['n'] as num).toInt(), (j['target'] as num).toInt(), Map<String, dynamic>.from(j['cp'] as Map));
+    } catch (_) {
+      return null;
+    }
+  }
+
+  static Future<void> clearSolo() async {
+    try {
+      final p = await SharedPreferences.getInstance();
+      await p.remove(_soloKey);
     } catch (_) {}
   }
 }
