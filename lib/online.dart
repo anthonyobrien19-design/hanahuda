@@ -12,7 +12,7 @@ import 'hanahuda_engine.dart';
 const String kDatabaseUrl = '';
 
 /// Address of your website (used to build invite links).
-const String kSiteUrl = 'https://anthonyobrien19-design.github.io/hanahuda/';
+const String kDatabaseUrl = 'https://hanahuda-419b7-default-rtdb.firebaseio.com';
 
 String inviteLink(String code) => '$kSiteUrl?join=$code';
 
