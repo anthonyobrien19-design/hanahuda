@@ -10,6 +10,8 @@ import 'package:flutter/services.dart';
 import 'hanahuda_engine.dart';
 import 'hanahuda_ai.dart';
 import 'online.dart';
+import 'session.dart';
+import 'voice.dart';
 
 void main() => runApp(const HanahudaApp());
 
@@ -165,10 +167,68 @@ class _SetupScreenState extends State<SetupScreen> {
   @override
   void initState() {
     super.initState();
-    // Invite links look like  https://.../hanahuda/?join=ABCD
-    final c = Uri.base.queryParameters['join'];
-    if (c != null && c.length == 4 && Rtdb.configured) {
-      WidgetsBinding.instance.addPostFrameCallback((_) => _join(preCode: c.toUpperCase()));
+    WidgetsBinding.instance.addPostFrameCallback((_) => _startup());
+  }
+
+  /// On launch: rejoin a game this device was in, follow an invite link, or show the intro once.
+  Future<void> _startup() async {
+    final link = Uri.base.queryParameters['join']?.toUpperCase();
+    final saved = await SessionStore.load();
+    if (saved != null && Rtdb.configured && (link == null || link == saved.code)) {
+      if (await _resume(saved)) return;
+    } else if (saved != null) {
+      await SessionStore.clear();
+    }
+    if (link != null && link.length == 4 && Rtdb.configured) {
+      await _join(preCode: link);
+      return;
+    }
+    if (!await SessionStore.seenIntro() && mounted) {
+      await SessionStore.markIntroSeen();
+      if (mounted) Navigator.push(context, MaterialPageRoute(builder: (_) => const IntroScreen()));
+    }
+  }
+
+  Future<bool> _resume(SavedSession s) async {
+    try {
+      final lobby = await Rtdb.get('rooms/${s.code}/lobby');
+      if (lobby is! Map) {
+        await SessionStore.clear();
+        return false;
+      }
+      final seats = keyed(lobby['seats']);
+      final nicks = List<String?>.generate(s.n, (i) => seats['$i']?.toString());
+      final started = lobby['started'] == true || s.inGame;
+      if (!mounted) return false;
+      _msg('Rejoining game ${s.code}...');
+      if (!started) {
+        Navigator.push(context, MaterialPageRoute(builder: (_) => LobbyScreen(nick: s.nick, code: s.code, isHost: s.isHost, mySeat: s.seat, n: s.n, target: s.target)));
+        return true;
+      }
+      Map<String, dynamic>? cp;
+      if (s.isHost) {
+        final c = await Rtdb.get('rooms/${s.code}/checkpoint');
+        if (c is Map) cp = Map<String, dynamic>.from(c);
+        if (cp == null) {
+          await SessionStore.clear();
+          return false;
+        }
+      }
+      if (!mounted) return false;
+      Navigator.push(
+        context,
+        MaterialPageRoute(
+          builder: (_) => GameScreen(
+            playerCount: s.n,
+            target: s.target,
+            online: OnlineConfig(code: s.code, isHost: s.isHost, mySeat: s.seat, seatNicks: nicks),
+            resume: cp,
+          ),
+        ),
+      );
+      return true;
+    } catch (_) {
+      return false;
     }
   }
 
@@ -343,8 +403,12 @@ class _SetupScreenState extends State<SetupScreen> {
                   value: listPublicly,
                   onChanged: (v) => setState(() => listPublicly = v),
                 ),
-                const SizedBox(height: 8),
-                const Text('Build 7', textAlign: TextAlign.center, style: TextStyle(fontSize: 11, color: Colors.white54)),
+                const SizedBox(height: 4),
+                Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+                  TextButton(onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const IntroScreen())), child: const Text('How to play')),
+                  TextButton(onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const RulesScreen())), child: const Text('Rules & scores')),
+                ]),
+                const Text('Build 8', textAlign: TextAlign.center, style: TextStyle(fontSize: 11, color: Colors.white54)),
               ],
             ),
           ))),
@@ -636,6 +700,188 @@ class CardArt extends CustomPainter {
   bool shouldRepaint(covariant CardArt old) => old.card != card;
 }
 
+// ---------------------------------------------------------------- How to play
+class IntroScreen extends StatefulWidget {
+  const IntroScreen({super.key});
+  @override
+  State<IntroScreen> createState() => _IntroScreenState();
+}
+
+class _IntroScreenState extends State<IntroScreen> {
+  final _pc = PageController();
+  int _page = 0;
+
+  Widget _label(String t, Widget w) => Column(mainAxisSize: MainAxisSize.min, children: [Text(t, style: const TextStyle(fontSize: 12)), w]);
+
+  Widget _slide(String title, Widget visual, List<String> lines) => SingleChildScrollView(
+        padding: const EdgeInsets.all(24),
+        child: Column(children: [
+          Text(title, textAlign: TextAlign.center, style: const TextStyle(fontSize: 26, fontWeight: FontWeight.bold)),
+          const SizedBox(height: 16),
+          visual,
+          const SizedBox(height: 16),
+          for (final l in lines) Padding(padding: const EdgeInsets.only(bottom: 8), child: Text('\u2022  $l', style: const TextStyle(fontSize: 16))),
+        ]),
+      );
+
+  @override
+  Widget build(BuildContext context) {
+    const plus = Padding(padding: EdgeInsets.symmetric(horizontal: 8), child: Text('+', style: TextStyle(fontSize: 26)));
+    const equals = Padding(padding: EdgeInsets.symmetric(horizontal: 8), child: Text('=', style: TextStyle(fontSize: 26)));
+    final slides = <Widget>[
+      _slide(
+        'Match the cards',
+        Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+          _label('On the table', const CardView(card: HCard(2, 3), width: 64)),
+          plus,
+          _label('From your hand', const CardView(card: HCard(2, 0), width: 64)),
+          equals,
+          _label('You take both', const CardView(card: HCard(2, 0), width: 64, highlight: true)),
+        ]),
+        [
+          'There are 12 flowers with 4 cards each. A card matches any card of the same flower.',
+          'Play a card from your hand. If it matches a card on the table, you take both.',
+          'Then flip the top card of the stack (omkais). If it matches, take both again.',
+          'No match? The card stays on the table.',
+        ],
+      ),
+      _slide(
+        'Score with combinations',
+        Column(children: [
+          Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+            _label('3 red ribbons: 100', Row(children: const [CardView(card: HCard(3, 1), width: 52), CardView(card: HCard(4, 1), width: 52), CardView(card: HCard(6, 1), width: 52)])),
+          ]),
+          const SizedBox(height: 10),
+          Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+            _label('3 bright cards: 300', Row(children: const [CardView(card: HCard(0, 0), width: 52), CardView(card: HCard(7, 0), width: 52), CardView(card: HCard(11, 0), width: 52)])),
+          ]),
+        ]),
+        [
+          'Bright cards are worth 50 (okeiim), ribbons are tang, and animal cards are 10 (teruich).',
+          'Collect matching sets, called yaks, to score. Yaks stack, so a big round can score a lot.',
+          'Six bright cards (arasi) or seven ribbons (nanatang) lets you end the round early.',
+          'See the Scores tab for every yak.',
+        ],
+      ),
+      _slide(
+        'A few rules',
+        const Icon(Icons.rule, size: 72),
+        [
+          'Two players get 10 cards each, three get 9, and four (teams sitting across) get 8.',
+          'Three cards of one flower on the table form a stack, and whoever holds the fourth takes it all. Four of a kind means a redeal.',
+          'Three of one flower in your hand (chitsiobiki) lets you swap one for a new card.',
+          'The first player and their partner can see the bottom card of the stack.',
+          'First team to the target score wins. The losing team deals next.',
+        ],
+      ),
+    ];
+    return Scaffold(
+      backgroundColor: const Color(0xFF14412A),
+      body: SafeArea(
+        child: Center(
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 560),
+            child: Column(children: [
+              Align(alignment: Alignment.centerRight, child: TextButton(onPressed: () => Navigator.pop(context), child: const Text('Skip'))),
+              Expanded(child: PageView(controller: _pc, onPageChanged: (i) => setState(() => _page = i), children: slides)),
+              Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+                for (var i = 0; i < slides.length; i++)
+                  Container(
+                    margin: const EdgeInsets.all(4),
+                    width: 10,
+                    height: 10,
+                    decoration: BoxDecoration(shape: BoxShape.circle, color: i == _page ? Colors.amber : Colors.white38),
+                  ),
+              ]),
+              Padding(
+                padding: const EdgeInsets.all(16),
+                child: SizedBox(
+                  width: double.infinity,
+                  child: FilledButton(
+                    onPressed: () {
+                      if (_page < slides.length - 1) {
+                        _pc.nextPage(duration: const Duration(milliseconds: 250), curve: Curves.easeOut);
+                      } else {
+                        Navigator.pop(context);
+                      }
+                    },
+                    child: Padding(padding: const EdgeInsets.all(12), child: Text(_page < slides.length - 1 ? 'Next' : "Let's play", style: const TextStyle(fontSize: 18))),
+                  ),
+                ),
+              ),
+            ]),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+// ---------------------------------------------------------------- Rules and scores
+class RulesScreen extends StatelessWidget {
+  const RulesScreen({super.key});
+
+  static const _rules = <List<String>>[
+    ['The cards', '48 cards in 12 flowers: mats, chume, sakura, mases, chudel, bara, babii, buil, kob, ska, nisoro and kiri. A card can only capture a card of its own flower.\n\nokeiim (50): the 6 bright cards.\ntang: the 10 ribbon cards.\nteruich (10): the 9 animal and object cards.\nkas: the 23 plain cards.'],
+    ['The deal', 'Two players get 10 cards each, three players get 9, and four players get 8. The same number of cards are dealt face up to the table. The rest form the stack.\n\nIn a four-player game, players sitting across from each other are partners.'],
+    ['Cutting and the bottom card', 'The player to the dealer\'s right may cut. The player to the left of the dealer plays first, and that player and their partner can see the bottom card of the stack. The other team cannot.'],
+    ['Stacks', 'Three cards of one flower on the table at the start form a stack. Whoever plays a card of that flower takes the whole stack. Four cards of one flower on the table means the cards are redealt. Two cards of one flower stay separate and you choose which to take.'],
+    ['Chitsiobiki', 'If you are dealt three cards of one flower, you may trade one of them for a card from the stack. Other players may ask to see all three.'],
+    ['Taking a turn', '1. Play any card from your hand. If it matches a card on the table, you take both. Otherwise it stays on the table.\n2. Flip the top card of the stack (omkais). If it matches a card on the table, take both. Otherwise it stays on the table.\n3. Play passes clockwise.'],
+    ['Ending a round', 'A round ends when all hands are played. Holding arasi or nanatang lets you end the round early, and then only that yak scores.\n\nIf nobody has a yak, the team with the higher total of okeiim and teruich points wins the round. A tie is a tie.'],
+    ['Winning', 'Play several rounds until a team reaches the target score, such as 5000. The losing team deals the next round. Yaks stack, so a team can score more than one in a round.'],
+  ];
+
+  static const _yaks = <List<String>>[
+    ['ksaiak', '100', '3 plain red ribbons (mases, chudel, babii)'],
+    ['ippai', '150', 'sakura bright + kob animal, or buil bright + kob animal'],
+    ['chauotang', '150', '3 purple ribbons (bara, kob, ska)'],
+    ['kodangko', '150', '3 poem ribbons (mats, chume, sakura)'],
+    ['nisoro', '200', 'the 3 scoring nisoro cards'],
+    ['teppo', '300', 'sakura bright + buil bright + kob animal'],
+    ['inoskasio', '300', 'babii, ska and bara animal cards'],
+    ['chume mats sakura', '300', 'the bright cards of those three flowers'],
+    ['mats kiri bo', '300', 'the bright cards of mats, kiri and buil'],
+    ['skok', '500', '4 bright cards: mats, buil, kiri, sakura'],
+    ['kokok', '700', '5 bright cards: skok plus nisoro'],
+    ['nanatang', '700', 'any 7 ribbons (can end the round)'],
+    ['arasi', '1000', 'all 6 bright cards (can end the round)'],
+    ['toiak', '10000', 'all 9 teruich cards'],
+  ];
+
+  @override
+  Widget build(BuildContext context) => DefaultTabController(
+        length: 2,
+        child: Scaffold(
+          appBar: AppBar(
+            title: const Text('Rules & scores'),
+            bottom: const TabBar(tabs: [Tab(text: 'Rules'), Tab(text: 'Scores')]),
+          ),
+          body: TabBarView(children: [
+            ListView(padding: const EdgeInsets.all(16), children: [
+              for (final r in _rules) ...[
+                Text(r[0], style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w600)),
+                const SizedBox(height: 4),
+                Text(r[1], style: const TextStyle(fontSize: 15)),
+                const SizedBox(height: 16),
+              ],
+            ]),
+            ListView(padding: const EdgeInsets.all(8), children: [
+              const Padding(padding: EdgeInsets.all(8), child: Text('Yaks stack: a team scores every yak it holds.', style: TextStyle(fontSize: 14))),
+              for (final y in _yaks)
+                Card(
+                  child: ListTile(
+                    title: Text(y[0], style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w600)),
+                    subtitle: Text(y[2]),
+                    trailing: Text(y[1], style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
+                  ),
+                ),
+            ]),
+          ]),
+        ),
+      );
+}
+
 // ---------------------------------------------------------------- Find open games
 class BrowseGamesScreen extends StatefulWidget {
   const BrowseGamesScreen({super.key});
@@ -762,12 +1008,14 @@ class _LobbyScreenState extends State<LobbyScreen> {
     super.initState();
     _t = Timer.periodic(const Duration(milliseconds: 1500), (_) => _poll());
     _poll();
+    _saveSession(false);
   }
 
   @override
   void dispose() {
     _t?.cancel();
     if (!_go) {
+      SessionStore.clear();
       if (widget.isHost) {
         Rtdb.delete('rooms/${widget.code}');
         Rtdb.delete('openGames/${widget.code}');
@@ -777,6 +1025,16 @@ class _LobbyScreenState extends State<LobbyScreen> {
     }
     super.dispose();
   }
+
+  void _saveSession(bool inGame) => SessionStore.save(SavedSession(
+        code: widget.code,
+        nick: widget.nick,
+        isHost: widget.isHost,
+        seat: mySeat,
+        n: widget.n,
+        target: widget.target,
+        inGame: inGame,
+      ));
 
   Future<void> _poll() async {
     try {
@@ -800,6 +1058,7 @@ class _LobbyScreenState extends State<LobbyScreen> {
   }
 
   void _launch(Map<String, dynamic> s) {
+    _saveSession(true);
     final nicks = List<String?>.generate(widget.n, (i) => s['$i']?.toString());
     Navigator.pushReplacement(
       context,
@@ -834,6 +1093,7 @@ class _LobbyScreenState extends State<LobbyScreen> {
       await Rtdb.put('rooms/${widget.code}/lobby/seats/$seat', widget.nick);
       await Rtdb.delete('rooms/${widget.code}/lobby/seats/$mySeat');
       if (mounted) setState(() => mySeat = seat);
+      _saveSession(false);
     } catch (_) {}
   }
 
@@ -864,7 +1124,14 @@ class _LobbyScreenState extends State<LobbyScreen> {
       if (widget.isHost)
         Padding(
           padding: const EdgeInsets.only(top: 8),
-          child: Center(child: OutlinedButton.icon(onPressed: _copyInvite, icon: const Icon(Icons.copy), label: const Text('Copy invite link'))),
+          child: Wrap(alignment: WrapAlignment.center, spacing: 8, runSpacing: 4, children: [
+            OutlinedButton.icon(onPressed: _copyInvite, icon: const Icon(Icons.copy), label: const Text('Copy invite link')),
+            OutlinedButton.icon(
+              onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => GameScreen(playerCount: widget.n, target: widget.target))),
+              icon: const Icon(Icons.smart_toy),
+              label: const Text('Practice vs computer'),
+            ),
+          ]),
         ),
       const SizedBox(height: 16),
     ];
@@ -912,12 +1179,13 @@ class GameScreen extends StatefulWidget {
   final int playerCount;
   final int target;
   final OnlineConfig? online;
-  const GameScreen({super.key, required this.playerCount, required this.target, this.online});
+  final Map<String, dynamic>? resume; // host only: restores a game after a reload
+  const GameScreen({super.key, required this.playerCount, required this.target, this.online, this.resume});
   @override
   State<GameScreen> createState() => _GameScreenState();
 }
 
-class _GameScreenState extends State<GameScreen> {
+class _GameScreenState extends State<GameScreen> with WidgetsBindingObserver {
   late Game game;
   final ai = HanahudaAI();
   final Map<int, int> totals = {};
@@ -935,14 +1203,20 @@ class _GameScreenState extends State<GameScreen> {
   Timer? _clientTimer;
   bool _publishing = false, _dirty = false, _polling = false, _everSaw = false;
   int _ver = 0, _actionN = 0, _noticeId = 0, _misses = 0;
-  int? _seenNotice;
+  int? _seenNoticeId;
+  bool _flushing = false, _closedShown = false, _resumed = false, _wasMyTurn = false;
+  final List<Map<String, dynamic>> _noticeList = [];
+  Timer? _reactTimer;
+  final Map<int, int> _reactSeen = {};
+  String? _bubble;
+  Timer? _bubbleTimer;
   HCard? _peekCard; // bottom card of the stack, seen only by the first player and partner
   Set<int> _peekSeats = {};
-  Map<String, dynamic>? _notice;
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     final n = widget.playerCount;
     final o = widget.online;
     String nameFor(int i) {
@@ -965,6 +1239,7 @@ class _GameScreenState extends State<GameScreen> {
       }
     }
     AudioManager.instance.startMusic();
+    if (o != null) _reactTimer = Timer.periodic(const Duration(milliseconds: 1500), (_) => _pollReactions());
     if (o != null && !o.isHost) {
       _clientTimer = Timer.periodic(const Duration(milliseconds: 900), (_) => _pollClient());
       WidgetsBinding.instance.addPostFrameCallback((_) => _pollClient());
@@ -975,11 +1250,36 @@ class _GameScreenState extends State<GameScreen> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    _voice?.stop();
+    _voiceTick.dispose();
     _clientTimer?.cancel();
+    _reactTimer?.cancel();
+    _bubbleTimer?.cancel();
     final o = widget.online;
-    if (o != null && o.isHost) Rtdb.delete('rooms/${o.code}');
+    if (o != null) {
+      SessionStore.clear();
+      if (o.isHost) {
+        // Tell players the game is over, then clean up after they have had time to see the results.
+        Rtdb.patch('rooms/${o.code}/state', {'closed': true}).catchError((_) {});
+        Future.delayed(const Duration(seconds: 60), () {
+          Rtdb.delete('rooms/${o.code}').catchError((_) {});
+          Rtdb.delete('openGames/${o.code}').catchError((_) {});
+        });
+      }
+    }
     AudioManager.instance.stopMusic();
     super.dispose();
+  }
+
+  /// Coming back from another app or tab: catch up right away.
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed && widget.online != null) {
+      _polling = false;
+      if (!widget.online!.isHost) _pollClient();
+      _pollReactions();
+    }
   }
 
   String teamName(int t) {
@@ -1002,7 +1302,8 @@ class _GameScreenState extends State<GameScreen> {
   }
 
   void _setNotice(String title, String body, {bool end = false}) {
-    _notice = {'id': ++_noticeId, 'title': title, 'body': body, 'end': end};
+    _noticeList.add({'id': ++_noticeId, 'title': title, 'body': body, 'end': end});
+    if (_noticeList.length > 4) _noticeList.removeAt(0);
     _publish();
   }
 
@@ -1033,7 +1334,7 @@ class _GameScreenState extends State<GameScreen> {
           'message': msg,
           'flipped': flipped?.id ?? -1,
           'totals': {for (final e in totals.entries) '${e.key}': e.value},
-          'notice': _notice,
+          'notices': _noticeList,
           'peek': (_peekCard != null && game.stack.isNotEmpty && game.stack.first == _peekCard) ? _peekCard!.id : -1,
           'peekSeats': _peekSeats.toList(),
         };
@@ -1107,6 +1408,17 @@ class _GameScreenState extends State<GameScreen> {
         _everSaw = true;
         _misses = 0;
         _apply(s, h);
+        if (s['closed'] == true && !_closedShown) {
+          _closedShown = true;
+          _clientTimer?.cancel();
+          while (_flushing) {
+            await Future.delayed(const Duration(milliseconds: 300));
+          }
+          if (mounted) {
+            await _dialog<void>('Game ended', 'The host ended the game.', (ctx) => [TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('OK'))]);
+            if (mounted) Navigator.pop(context);
+          }
+        }
       } else if (_everSaw && ++_misses >= 3) {
         _clientTimer?.cancel();
         await _dialog<void>('Game ended', 'The host left the game.', (ctx) => [TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('OK'))]);
@@ -1157,6 +1469,9 @@ class _GameScreenState extends State<GameScreen> {
     });
     final lg = h is Map ? asIds(h['legal']) : <int>[];
     final fl = (s['flipped'] as num?)?.toInt() ?? -1;
+    final nowMine = lg.isNotEmpty;
+    if (nowMine && !_wasMyTurn) AudioManager.instance.sfx('turn');
+    _wasMyTurn = nowMine;
     setState(() {
       game = g;
       totals
@@ -1168,16 +1483,253 @@ class _GameScreenState extends State<GameScreen> {
       final pid = (s['peek'] as num?)?.toInt() ?? -1;
       _peekCard = (pid >= 0 && asIds(s['peekSeats']).contains(my)) ? cardFromId(pid) : null;
     });
-    final nt = s['notice'];
-    if (nt is Map) {
-      final id = (nt['id'] as num).toInt();
-      if (_seenNotice == null) {
-        _seenNotice = id;
-      } else if (id != _seenNotice) {
-        _seenNotice = id;
-        _showNotice('${nt['title']}', '${nt['body']}', nt['end'] == true);
+    final nl = [for (final x in asList(s['notices'])) if (x is Map) Map<String, dynamic>.from(x)];
+    nl.sort((a, b) => (a['id'] as num).compareTo(b['id'] as num));
+    if (nl.isNotEmpty) {
+      final maxId = (nl.last['id'] as num).toInt();
+      if (_seenNoticeId == null) {
+        _seenNoticeId = maxId; // just joined: only show a finished match
+        if (nl.last['end'] == true) _flushNotices([nl.last]);
+      } else {
+        final fresh = nl.where((x) => (x['id'] as num).toInt() > _seenNoticeId!).toList();
+        if (fresh.isNotEmpty) {
+          _seenNoticeId = maxId;
+          _flushNotices(fresh);
+        }
       }
     }
+  }
+
+  /// Shows every result the host sent, in order, even if several arrived between checks.
+  Future<void> _flushNotices(List<Map<String, dynamic>> items) async {
+    while (_flushing) {
+      await Future.delayed(const Duration(milliseconds: 300));
+    }
+    _flushing = true;
+    try {
+      for (final nt in items) {
+        if (!mounted) break;
+        await _showNotice('${nt['title']}', '${nt['body']}', nt['end'] == true);
+        if (nt['end'] == true) break;
+      }
+    } finally {
+      _flushing = false;
+    }
+  }
+
+  // ---- Reactions ----
+  static const _emojis = ['\u{1F44F}', '\u{1F602}', '\u{1F62E}', '\u{1F525}', '\u{1F622}', '\u{1F44D}', '\u{1F389}', '\u{1F634}', '\u{1F64C}', '\u{1F605}'];
+
+  String _seatName(int seat) {
+    final o = widget.online!;
+    final n = widget.playerCount;
+    final idx = o.isHost ? seat : (seat - o.mySeat + n) % n;
+    return (idx >= 0 && idx < game.players.length) ? game.players[idx].name : 'Player';
+  }
+
+  void _showBubble(String text) {
+    _bubbleTimer?.cancel();
+    setState(() => _bubble = text);
+    _bubbleTimer = Timer(const Duration(seconds: 3), () {
+      if (mounted) setState(() => _bubble = null);
+    });
+  }
+
+  void _sendReaction(String emoji) {
+    final o = widget.online;
+    if (o == null) return;
+    final n = DateTime.now().millisecondsSinceEpoch;
+    _reactSeen[o.mySeat] = n;
+    Rtdb.put('rooms/${o.code}/reactions/${o.mySeat}', {'n': n, 'e': emoji}).catchError((_) {});
+    _showBubble('You $emoji');
+  }
+
+  Future<void> _pollReactions() async {
+    final o = widget.online;
+    if (o == null || !mounted) return;
+    try {
+      final r = keyed(await Rtdb.get('rooms/${o.code}/reactions'));
+      r.forEach((k, v) {
+        final seat = int.tryParse(k);
+        if (seat == null || v is! Map || seat == o.mySeat) return;
+        final n = (v['n'] as num).toInt();
+        final seen = _reactSeen[seat];
+        _reactSeen[seat] = n;
+        if (seen != null && n > seen && mounted) _showBubble('${_seatName(seat)} ${v['e']}');
+      });
+    } catch (_) {}
+  }
+
+  void _openReactions() {
+    showModalBottomSheet<void>(
+      context: context,
+      builder: (ctx) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.all(16),
+          child: Wrap(spacing: 8, runSpacing: 8, alignment: WrapAlignment.center, children: [
+            for (final e in _emojis)
+              InkWell(
+                onTap: () {
+                  Navigator.pop(ctx);
+                  _sendReaction(e);
+                },
+                child: Padding(padding: const EdgeInsets.all(8), child: Text(e, style: const TextStyle(fontSize: 34))),
+              ),
+          ]),
+        ),
+      ),
+    );
+  }
+
+  // ---- Voice chat ----
+  VoiceChat? _voice;
+  final ValueNotifier<int> _voiceTick = ValueNotifier<int>(0);
+
+  Future<void> _joinVoice() async {
+    final o = widget.online;
+    if (o == null) return;
+    final v = VoiceChat(
+      code: o.code,
+      mySeat: o.mySeat,
+      onChanged: () {
+        if (mounted) {
+          setState(() {});
+          _voiceTick.value++;
+        }
+      },
+    );
+    _voice = v;
+    final ok = await v.start();
+    if (!ok) {
+      _voice = null;
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(v.status)));
+    }
+    if (mounted) setState(() {});
+    _voiceTick.value++;
+  }
+
+  Future<void> _leaveVoice() async {
+    final v = _voice;
+    _voice = null;
+    await v?.stop();
+    if (mounted) setState(() {});
+    _voiceTick.value++;
+  }
+
+  int _seatOfIndex(int i) {
+    final o = widget.online;
+    if (o == null) return i;
+    return o.isHost ? i : (o.mySeat + i) % widget.playerCount;
+  }
+
+  void _openVoice() {
+    final o = widget.online;
+    if (o == null) return;
+    showModalBottomSheet<void>(
+      context: context,
+      builder: (ctx) => ValueListenableBuilder<int>(
+        valueListenable: _voiceTick,
+        builder: (c, _, __) {
+          final v = _voice;
+          final humans = [for (var s = 0; s < widget.playerCount; s++) if (s < o.seatNicks.length && o.seatNicks[s] != null) s];
+          return SafeArea(
+            child: Padding(
+              padding: const EdgeInsets.all(16),
+              child: Column(mainAxisSize: MainAxisSize.min, children: [
+                const Text('Voice chat', style: TextStyle(fontSize: 20, fontWeight: FontWeight.w600)),
+                const SizedBox(height: 8),
+                Text(
+                  v == null ? 'Talk with the other players in this game. Your browser or phone will ask to use the microphone.' : v.status,
+                  textAlign: TextAlign.center,
+                ),
+                const SizedBox(height: 8),
+                if (v != null)
+                  for (final s in humans)
+                    ListTile(
+                      dense: true,
+                      leading: Icon(v.speaking.contains(s) ? Icons.graphic_eq : Icons.person, color: v.speaking.contains(s) ? Colors.green : null),
+                      title: Text(s == o.mySeat ? 'You' : _seatName(s)),
+                      trailing: Text((s == o.mySeat || v.members.contains(s)) ? 'in voice' : 'not in voice', style: const TextStyle(fontSize: 12)),
+                    ),
+                const SizedBox(height: 8),
+                if (v == null)
+                  FilledButton.icon(onPressed: _joinVoice, icon: const Icon(Icons.mic), label: const Text('Join voice chat'))
+                else
+                  Wrap(spacing: 8, children: [
+                    OutlinedButton.icon(
+                      onPressed: () => v.setMuted(!v.muted),
+                      icon: Icon(v.muted ? Icons.mic_off : Icons.mic),
+                      label: Text(v.muted ? 'Unmute' : 'Mute'),
+                    ),
+                    OutlinedButton.icon(onPressed: _leaveVoice, icon: const Icon(Icons.call_end), label: const Text('Leave voice')),
+                  ]),
+              ]),
+            ),
+          );
+        },
+      ),
+    );
+  }
+
+  // ---- Host: save the game so it can be restored after a reload ----
+  void _checkpoint() {
+    final o = widget.online;
+    if (o == null || !o.isHost) return;
+    final cp = <String, Object?>{
+      'hands': {for (var i = 0; i < game.players.length; i++) '$i': [for (final c in game.players[i].hand) c.id]},
+      'stack': [for (final c in game.stack) c.id],
+      'table': [for (final c in game.table) c.id],
+      'piles': {for (final e in game.teamPiles.entries) '${e.key}': [for (final c in e.value) c.id]},
+      'current': game.current,
+      'dealer': game.dealer,
+      'totals': {for (final e in totals.entries) '${e.key}': e.value},
+      'peekSeats': _peekSeats.toList(),
+      'peek': _peekCard?.id ?? -1,
+    };
+    Rtdb.put('rooms/${o.code}/checkpoint', cp).catchError((_) {});
+  }
+
+  void _restore(Map<String, dynamic> cp) {
+    final hands = keyed(cp['hands']);
+    for (var i = 0; i < game.players.length; i++) {
+      game.players[i].hand
+        ..clear()
+        ..addAll(asIds(hands['$i']).map(cardFromId));
+    }
+    game.stack
+      ..clear()
+      ..addAll(asIds(cp['stack']).map(cardFromId));
+    game.table
+      ..clear()
+      ..addAll(asIds(cp['table']).map(cardFromId));
+    for (final t in game.teamPiles.keys) {
+      game.teamPiles[t]!.clear();
+    }
+    keyed(cp['piles']).forEach((k, v) {
+      final t = int.tryParse(k);
+      if (t != null && game.teamPiles[t] != null) game.teamPiles[t]!.addAll(asIds(v).map(cardFromId));
+    });
+    game.current = (cp['current'] as num).toInt();
+    game.dealer = (cp['dealer'] as num).toInt();
+    keyed(cp['totals']).forEach((k, v) {
+      final t = int.tryParse(k);
+      if (t != null) totals[t] = (v as num).toInt();
+    });
+    _peekSeats = asIds(cp['peekSeats']).toSet();
+    final pk = (cp['peek'] as num?)?.toInt() ?? -1;
+    _peekCard = pk >= 0 ? cardFromId(pk) : null;
+  }
+
+  /// After a restore, ignore moves that were sent before the reload.
+  Future<void> _syncActions() async {
+    final o = widget.online;
+    if (o == null) return;
+    try {
+      keyed(await Rtdb.get('rooms/${o.code}/actions')).forEach((k, v) {
+        final seat = int.tryParse(k);
+        if (seat != null && v is Map) _lastAction[seat] = (v['n'] as num).toInt();
+      });
+    } catch (_) {}
   }
 
   Future<void> _showNotice(String title, String body, bool end) async {
@@ -1212,6 +1764,17 @@ class _GameScreenState extends State<GameScreen> {
   String _totalsText() => totals.entries.map((e) => '${_tn(e.key)}: ${e.value}').join('\n');
 
   Future<void> _playRound() async {
+    final cp = widget.resume;
+    if (cp != null && !_resumed) {
+      _resumed = true;
+      _restore(cp);
+      setState(() {
+        flipped = null;
+        message = 'Game restored. Welcome back!';
+      });
+      await _syncActions();
+      await _delay(800);
+    } else {
     game.deal();
     AudioManager.instance.sfx('deal');
     setState(() {
@@ -1227,8 +1790,10 @@ class _GameScreenState extends State<GameScreen> {
       setState(() => message = 'You can see the bottom card of the stack.');
       await _delay(1200);
     }
+    }
     RoundResult? result;
     while (!game.roundOver) {
+      _checkpoint();
       final cur = game.current;
       final early = cur == 0 ? await _humanTurn() : (_remote.contains(cur) ? await _remoteTurn(cur) : await _aiTurn());
       if (!mounted) return;
@@ -1299,6 +1864,7 @@ class _GameScreenState extends State<GameScreen> {
       legal = game.legalPlays(p).toSet();
       message = 'Your turn: play a card';
     });
+    AudioManager.instance.sfx('turn');
     _handPick = Completer<HCard>();
     final card = await _handPick!.future;
     if (!mounted) return null;
@@ -1508,6 +2074,7 @@ class _GameScreenState extends State<GameScreen> {
             Chip(
               backgroundColor: game.current == i ? Colors.amber.withOpacity(0.35) : null,
               visualDensity: _compact ? VisualDensity.compact : VisualDensity.standard,
+              avatar: (_voice?.speaking.contains(_seatOfIndex(i)) ?? false) ? const Icon(Icons.graphic_eq, size: 18, color: Colors.greenAccent) : null,
               label: Text('${game.players[i].name}  ${game.players[i].hand.length} cards', style: TextStyle(fontSize: _compact ? 13 : 16)),
             ),
         ],
@@ -1664,12 +2231,39 @@ class _GameScreenState extends State<GameScreen> {
   @override
   Widget build(BuildContext context) {
     final hand = game.players[0].hand;
-    return Scaffold(
+    return PopScope(
+      canPop: widget.online == null,
+      onPopInvokedWithResult: (didPop, result) async {
+        if (didPop) return;
+        final leave = await showDialog<bool>(
+          context: context,
+          builder: (ctx) => AlertDialog(
+            title: const Text('Leave this game?'),
+            content: Text(widget.online!.isHost ? 'You are the host, so leaving ends the game for everyone.' : 'You can rejoin from the start screen while the game is still running.'),
+            actions: [
+              TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Stay')),
+              FilledButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Leave')),
+            ],
+          ),
+        );
+        if (leave == true && mounted) Navigator.of(context).pop();
+      },
+      child: Scaffold(
       appBar: AppBar(
-        title: Text(totals.entries.map((e) => '${teamName(e.key)} ${e.value}').join('  |  '), style: const TextStyle(fontSize: 19, fontWeight: FontWeight.w600)),
+        title: Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
+          Text(totals.entries.map((e) => '${teamName(e.key)} ${e.value}').join('  |  '), maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w600)),
+          Text('First to ${widget.target}', style: const TextStyle(fontSize: 12)),
+        ]),
         actions: [
-          Center(child: Text('to ${widget.target}', style: const TextStyle(fontSize: 17))),
-          IconButton(icon: const Icon(Icons.settings), onPressed: _openSettings),
+          if (widget.online != null) IconButton(tooltip: 'Reactions', icon: const Icon(Icons.emoji_emotions_outlined), onPressed: _openReactions),
+          if (widget.online != null)
+            IconButton(
+              tooltip: 'Voice chat',
+              icon: Icon(_voice == null ? Icons.mic_none : (_voice!.muted ? Icons.mic_off : Icons.mic), color: _voice == null ? null : (_voice!.muted ? Colors.redAccent : Colors.greenAccent)),
+              onPressed: _openVoice,
+            ),
+          IconButton(tooltip: 'Rules and scores', icon: const Icon(Icons.menu_book), onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const RulesScreen()))),
+          IconButton(tooltip: 'Settings', icon: const Icon(Icons.settings), onPressed: _openSettings),
         ],
       ),
       body: Stack(children: [
@@ -1735,7 +2329,34 @@ class _GameScreenState extends State<GameScreen> {
             );
           }),
         ),
+        // Hidden players that carry other people's voices.
+        if (_voice != null) ..._voice!.audioViews(),
+        // Glowing border when it is your turn.
+        Positioned.fill(
+          child: IgnorePointer(
+            child: AnimatedContainer(
+              duration: const Duration(milliseconds: 300),
+              decoration: BoxDecoration(border: Border.all(color: legal.isNotEmpty ? Colors.amberAccent : Colors.transparent, width: 6)),
+            ),
+          ),
+        ),
+        // Reaction pop-up.
+        if (_bubble != null)
+          Positioned(
+            top: 10,
+            left: 0,
+            right: 0,
+            child: IgnorePointer(
+              child: Center(
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 10),
+                  decoration: BoxDecoration(color: Colors.black87, borderRadius: BorderRadius.circular(24)),
+                  child: Text(_bubble!, style: const TextStyle(fontSize: 24)),
+                ),
+              ),
+            ),
+          ),
       ]),
-    );
+    ));
   }
 }

@@ -9,15 +9,26 @@ import 'dart:math';
 import 'package:http/http.dart' as http;
 import 'hanahuda_engine.dart';
 
-const String kDatabaseUrl = 'https://hanahuda-419b7-default-rtdb.firebaseio.com/';
+const String kDatabaseUrl = '';
 
 /// Address of your website (used to build invite links).
 const String kSiteUrl = 'https://anthonyobrien19-design.github.io/hanahuda/';
 
 String inviteLink(String code) => '$kSiteUrl?join=$code';
 
+
+/// Optional relay (TURN) server so voice also works for players on mobile data or strict networks.
+/// Leave empty to use only the free Google STUN server. Example for a Metered account:
+///   kTurnUrl = 'turn:global.relay.metered.ca:80', plus your username and password.
+const String kTurnUrl = '';
+const String kTurnUser = '';
+const String kTurnPass = '';
+
 class Rtdb {
   static bool get configured => kDatabaseUrl.trim().isNotEmpty;
+
+  // A request that hangs (for example while the tab is in the background) must not freeze the game.
+  static const _wait = Duration(seconds: 8);
 
   static String get _base {
     final u = kDatabaseUrl.trim();
@@ -27,23 +38,23 @@ class Rtdb {
   static Uri _u(String path) => Uri.parse('$_base/$path.json');
 
   static Future<dynamic> get(String path) async {
-    final r = await http.get(_u(path));
+    final r = await http.get(_u(path)).timeout(_wait);
     if (r.statusCode != 200) throw Exception('HTTP ${r.statusCode}');
     return jsonDecode(r.body);
   }
 
   static Future<void> put(String path, Object? data) async {
-    final r = await http.put(_u(path), body: jsonEncode(data));
+    final r = await http.put(_u(path), body: jsonEncode(data)).timeout(_wait);
     if (r.statusCode != 200) throw Exception('HTTP ${r.statusCode}');
   }
 
   static Future<void> patch(String path, Map<String, Object?> data) async {
-    final r = await http.patch(_u(path), body: jsonEncode(data));
+    final r = await http.patch(_u(path), body: jsonEncode(data)).timeout(_wait);
     if (r.statusCode != 200) throw Exception('HTTP ${r.statusCode}');
   }
 
   static Future<void> delete(String path) async {
-    await http.delete(_u(path));
+    await http.delete(_u(path)).timeout(_wait);
   }
 }
 
