@@ -19,6 +19,9 @@ class VoiceChat {
   final Map<int, bool> _remoteSet = {}, _ready = {};
   final Set<int> _failed = {};
 
+  final Map<int, String> state = {}; // per teammate: connecting / connected / disconnected / failed
+  final Map<int, DateTime> _born = {}, _memChanged = {};
+  final Map<int, String> _lastMem = {};
   final Set<int> speaking = {};
   Set<int> members = {};
   bool muted = false, active = false;
@@ -29,13 +32,20 @@ class VoiceChat {
   String _key(int a, int b) => a < b ? '${a}_$b' : '${b}_$a';
   String get _base => 'rooms/$code/voice';
 
-  Map<String, dynamic> get _config => {
-        'iceServers': [
-          {'urls': 'stun:stun.l.google.com:19302'},
-          if (kTurnUrl.isNotEmpty) {'urls': kTurnUrl, 'username': kTurnUser, 'credential': kTurnPass},
-        ],
-        'sdpSemantics': 'unified-plan',
-      };
+  Map<String, dynamic> get _config {
+    final servers = <Map<String, dynamic>>[
+      {'urls': 'stun:stun.l.google.com:19302'},
+    ];
+    if (kTurnUrl.isNotEmpty) {
+      final host = RegExp(r'^turns?:([^:?]+)').firstMatch(kTurnUrl)?.group(1);
+      final urls = <String>[kTurnUrl];
+      if (host != null) {
+        urls.addAll(['turn:$host:80?transport=tcp', 'turn:$host:443', 'turn:$host:443?transport=tcp', 'turns:$host:443?transport=tcp']);
+      }
+      servers.add({'urls': urls.toSet().toList(), 'username': kTurnUser, 'credential': kTurnPass});
+    }
+    return {'iceServers': servers, 'sdpSemantics': 'unified-plan'};
+  }
 
   Future<bool> start() async {
     try {
@@ -95,23 +105,38 @@ class VoiceChat {
     try {
       await Rtdb.put('$_base/members/$mySeat', DateTime.now().millisecondsSinceEpoch);
       final mem = keyed(await Rtdb.get('$_base/members'));
-      final now = DateTime.now().millisecondsSinceEpoch;
+      final now = DateTime.now();
       final live = <int>{};
       mem.forEach((k, v) {
         final s = int.tryParse(k);
-        final t = (v as num?)?.toInt() ?? 0;
-        if (s != null && s != mySeat && now - t < 30000) live.add(s);
+        if (s == null || s == mySeat) return;
+        // Judge by "did their heartbeat change recently on MY clock", so phones with different clocks still work.
+        if (_lastMem[s] != '$v') {
+          _lastMem[s] = '$v';
+          _memChanged[s] = now;
+        }
+        if (now.difference(_memChanged[s] ?? now).inSeconds < 30) live.add(s);
       });
+      for (final s in _lastMem.keys.toList()) {
+        if (!mem.containsKey('$s')) {
+          _lastMem.remove(s);
+          _memChanged.remove(s);
+        }
+      }
       members = live;
+      final sig = keyed(await Rtdb.get('$_base/sig'));
       for (final s in _peers.keys.toList()) {
-        if (!live.contains(s) || _failed.contains(s)) {
+        final born = _born[s];
+        final stuck = born != null && now.difference(born).inSeconds > 20 && state[s] != 'connected';
+        final wiped = _remoteSet[s] == true && sig[_key(mySeat, s)] == null; // the other side started over
+        if (!live.contains(s) || _failed.contains(s) || stuck || wiped) {
           await _closePeer(s);
           if (live.contains(s)) await Rtdb.delete('$_base/sig/${_key(mySeat, s)}');
         }
       }
-      final sig = keyed(await Rtdb.get('$_base/sig'));
+      final sig2 = keyed(await Rtdb.get('$_base/sig'));
       for (final s in live) {
-        await _connect(s, sig[_key(mySeat, s)]);
+        await _connect(s, sig2[_key(mySeat, s)]);
         await _flushCands(s);
       }
       await _levels();
@@ -132,6 +157,8 @@ class VoiceChat {
     _remoteSet[s] = false;
     _ready[s] = false;
     _failed.remove(s);
+    _born[s] = DateTime.now();
+    state[s] = 'connecting';
     for (final t in _local!.getTracks()) {
       await pc.addTrack(t, _local!);
     }
@@ -146,13 +173,30 @@ class VoiceChat {
       if (r == null) {
         r = RTCVideoRenderer();
         await r.initialize();
+        try {
+          (r as dynamic).muted = false; // make sure the browser plays the sound
+        } catch (_) {}
         _renderers[s] = r;
       }
       r.srcObject = e.streams.first;
       onChanged();
     };
     pc.onConnectionState = (RTCPeerConnectionState st) {
-      if (st == RTCPeerConnectionState.RTCPeerConnectionStateFailed) _failed.add(s);
+      switch (st) {
+        case RTCPeerConnectionState.RTCPeerConnectionStateConnected:
+          state[s] = 'connected';
+          break;
+        case RTCPeerConnectionState.RTCPeerConnectionStateFailed:
+          state[s] = 'failed';
+          _failed.add(s);
+          break;
+        case RTCPeerConnectionState.RTCPeerConnectionStateDisconnected:
+          state[s] = 'disconnected';
+          break;
+        default:
+          break;
+      }
+      onChanged();
     };
     return pc;
   }
@@ -175,6 +219,8 @@ class VoiceChat {
     _ready.remove(s);
     _sid.remove(s);
     _failed.remove(s);
+    _born.remove(s);
+    state.remove(s);
   }
 
   Future<void> _connect(int s, dynamic node) async {

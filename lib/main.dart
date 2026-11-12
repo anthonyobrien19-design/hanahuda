@@ -2010,7 +2010,7 @@ class _GameScreenState extends State<GameScreen> with WidgetsBindingObserver {
                       dense: true,
                       leading: Icon(v.speaking.contains(s) ? Icons.graphic_eq : Icons.person, color: v.speaking.contains(s) ? Colors.green : null),
                       title: Text(s == o.mySeat ? 'You' : _seatName(s)),
-                      trailing: Text((s == o.mySeat || v.members.contains(s)) ? 'in voice' : 'not in voice', style: const TextStyle(fontSize: 12)),
+                      trailing: Text(s == o.mySeat ? 'you' : 'in voice: ${v.state[s] ?? 'waiting'}', style: const TextStyle(fontSize: 12)),
                     ),
                 const SizedBox(height: 8),
                 if (v == null)
